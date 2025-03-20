@@ -1,3 +1,3 @@
 # testing met python en git
 
-print ('Hello World!')
+print ('Test is succesvol')
