@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 from datetime import datetime
 
 # Specify the path to your Excel file
-file_path = 'Data\ClimateTimeSeries.xlsx'
+file_path = r'Data\ClimateTimeSeries.xlsx'
 
 # Read the Excel file into a DataFrame using the openpyxl engine
 df = pd.read_excel(file_path, sheet_name='weather_climate', engine='openpyxl')

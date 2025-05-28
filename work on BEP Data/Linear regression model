@@ -1,0 +1,78 @@
+import pandas as pd
+from sklearn.linear_model import LinearRegression
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_squared_error, r2_score
+import matplotlib.pyplot as plt
+
+# Load the Excel file
+file_path = "Data\Measurements From BEP Group 2021.xlsx"
+xls = pd.ExcelFile(file_path)
+df = xls.parse('Edited copy 27-05-21 and onward')
+
+# Skip the first two rows which are metadata/header rows
+data = df.iloc[2:].copy()
+
+# Rename the relevant columns for Plant 2 and shared temperature
+data = data.rename(columns={
+    'Tijdstip': 'timestamp',
+    'Unnamed: 5': 'mass',              # Plant 2 mass
+    'Unnamed: 6': 'humidity',          # Plant 2 soil humidity
+    'Unnamed: 7': 'ldr',               # Plant 2 LDR (light)
+    'Unnamed: 11': 'temperature'       # Shared temperature (Kas 2)
+})
+
+# Convert timestamp column to datetime
+data['timestamp'] = pd.to_datetime(data['timestamp'])
+
+# Convert sensor values to numeric
+for col in ['mass', 'humidity', 'ldr', 'temperature']:
+    data[col] = pd.to_numeric(data[col], errors='coerce')
+
+# Drop rows with missing values
+clean_data = data[['timestamp', 'mass', 'humidity', 'ldr', 'temperature']].dropna()
+
+# Create target variable: next time step mass
+clean_data['mass_next'] = clean_data['mass'].shift(-1)
+
+# Drop last row (NaN in target)
+clean_data = clean_data.dropna()
+
+# Prepare features and target
+X = clean_data[['mass', 'humidity', 'ldr', 'temperature']]
+y = clean_data['mass_next']
+
+# Split into train/test (preserving time order)
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
+
+# Train linear regression model
+model = LinearRegression()
+model.fit(X_train, y_train)
+
+# Predict
+y_pred = model.predict(X_test)
+
+# Evaluate model
+mse = mean_squared_error(y_test, y_pred)
+r2 = r2_score(y_test, y_pred)
+coefficients = dict(zip(X.columns, model.coef_))
+intercept = model.intercept_
+
+# Print results
+print("=== Linear Regression Results ===")
+print(f"Mean Squared Error: {mse:.4f}")
+print(f"R² Score: {r2:.4f}")
+print(f"Intercept: {intercept:.4f}")
+print("Coefficients:")
+for feature, coef in coefficients.items():
+    print(f"  {feature}: {coef:.4f}")
+
+# Plot: Actual vs Predicted
+plt.figure(figsize=(12, 6))
+plt.plot(y_test.values, label='Actual Mass', linewidth=2)
+plt.plot(y_pred, label='Predicted Mass', linestyle='--', linewidth=2)
+plt.title("Predicted vs Actual Mass (Next Time Step)")
+plt.ylabel("Mass (grams)")
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.show()
