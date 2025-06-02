@@ -1,0 +1,103 @@
+import pandas as pd
+from sklearn.linear_model import LinearRegression
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_squared_error, r2_score
+from sklearn.preprocessing import PolynomialFeatures
+from sklearn.pipeline import make_pipeline
+import matplotlib.pyplot as plt
+
+# Load the Excel file
+file_path = r"Data\Measurements From BEP Group 2021.xlsx"
+xls = pd.ExcelFile(file_path)
+
+# Load the relevant sheet
+df = xls.parse('Edited copy 27-05-21 and onward')
+
+# Skip headers/meta rows (adjusted to your exact data structure)
+data = df.iloc[3:].copy()
+
+# Rename correct columns based on your confirmed mappings
+data.columns.values[0] = 'timestamp'
+data.columns.values[9] = 'mass'
+data.columns.values[10] = 'soil_humidity'
+data.columns.values[7] = 'ldr'
+data.columns.values[12] = 'air_humidity'
+data.columns.values[11] = 'temperature'
+
+# Convert timestamp and numeric columns properly
+data['timestamp'] = pd.to_datetime(data['timestamp'])
+for col in ['mass', 'soil_humidity', 'air_humidity', 'ldr', 'temperature']:
+    data[col] = pd.to_numeric(data[col], errors='coerce')
+
+# Drop rows with missing data
+clean_data = data[['timestamp', 'mass', 'soil_humidity', 'air_humidity', 'ldr', 'temperature']].dropna()
+
+# Detect watering events (threshold may be adjusted)
+threshold = 5  # grams, adjust as needed
+clean_data['mass_diff'] = clean_data['mass'].diff()
+clean_data['is_watered'] = (clean_data['mass_diff'] > threshold).astype(int)
+
+# Add target variable (next time step's mass)
+clean_data['mass_next'] = clean_data['mass'].shift(-1)
+clean_data = clean_data.dropna().reset_index(drop=True)
+
+# Define features and target
+X = clean_data[['mass', 'soil_humidity', 'air_humidity', 'ldr', 'temperature', 'is_watered']]
+y = clean_data['mass_next']
+
+# Train-test split (no shuffle, preserving time series order)
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, shuffle=False
+)
+
+# Polynomial regression (degree 2)
+model = make_pipeline(PolynomialFeatures(degree=2, include_bias=False), LinearRegression())
+model.fit(X_train, y_train)
+
+# Predict on test set
+y_pred = model.predict(X_test)
+
+# Evaluation metrics
+mse = mean_squared_error(y_test, y_pred)
+r2 = r2_score(y_test, y_pred)
+print("\n=== Polynomial Regression (Degree 2) with Watering Events ===")
+print(f"Mean Squared Error: {mse:.4f}")
+print(f"R² Score: {r2:.4f}")
+
+# Print expanded coefficients clearly
+feature_names = model.named_steps['polynomialfeatures'].get_feature_names_out(X.columns)
+coefficients = model.named_steps['linearregression'].coef_
+intercept = model.named_steps['linearregression'].intercept_
+
+print(f"Intercept: {intercept:.4f}")
+print("Coefficients:")
+for name, coef in zip(feature_names, coefficients):
+    print(f"  {name}: {coef:.4f}")
+
+# Generate predictions for entire dataset
+y_pred_full = model.predict(X)
+
+# Create DataFrame for full dataset plotting
+full_results_df = pd.DataFrame({
+    'timestamp': clean_data['timestamp'],
+    'actual_mass': clean_data['mass_next'],
+    'predicted_mass': y_pred_full,
+    'is_watered': clean_data['is_watered']
+})
+
+# Plot all data (train + test)
+plt.figure(figsize=(16, 7))
+plt.plot(full_results_df['timestamp'], full_results_df['actual_mass'], label='Actual Mass', linewidth=2)
+plt.plot(full_results_df['timestamp'], full_results_df['predicted_mass'], label='Predicted Mass', linestyle='--', linewidth=2)
+plt.scatter(full_results_df.loc[full_results_df['is_watered'] == 1, 'timestamp'],
+            full_results_df.loc[full_results_df['is_watered'] == 1, 'actual_mass'],
+            color='red', marker='o', s=100, label='Watering Events')
+
+plt.title("Mass Prediction (Entire Dataset) with Detected Watering Events")
+plt.xlabel("Timestamp")
+plt.ylabel("Mass (grams)")
+plt.xticks(rotation=45)
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.show()

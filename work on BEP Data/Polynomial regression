@@ -2,20 +2,21 @@ import pandas as pd
 from sklearn.linear_model import LinearRegression
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error, r2_score
+from sklearn.preprocessing import PolynomialFeatures
+from sklearn.pipeline import make_pipeline
 import matplotlib.pyplot as plt
 
 # Load the Excel file
-file_path = r"Data\Measurements From BEP Group 2021.xlsx"  # Ensure this is in the same folder
+file_path = r"Data\Measurements From BEP Group 2021.xlsx"  # Update path if needed
 xls = pd.ExcelFile(file_path)
 
 # Load the relevant sheet
 df = xls.parse('Edited copy 27-05-21 and onward')
 
-# Skip the first two rows (headers/meta)
+# Skip the first few rows (headers/meta)
 data = df.iloc[3:].copy()
 
-#print(data.columns.tolist())
-
+# Rename correct columns
 data.columns.values[0] = 'timestamp'
 data.columns.values[9] = 'mass'
 data.columns.values[10] = 'soil_humidity'
@@ -23,11 +24,7 @@ data.columns.values[7] = 'ldr'
 data.columns.values[12] = 'air_humidity'
 data.columns.values[11] = 'temperature'
 
-#print(data[['mass', 'soil_humidity', 'air_humidity', 'ldr', 'temperature']].isna().sum())
-#print(data[['mass', 'soil_humidity', 'air_humidity', 'ldr', 'temperature']].dropna().shape)
-
-
-# Convert timestamp and sensor columns to numeric
+# Convert timestamp and sensor columns
 data['timestamp'] = pd.to_datetime(data['timestamp'])
 for col in ['mass', 'soil_humidity', 'air_humidity', 'ldr', 'temperature']:
     data[col] = pd.to_numeric(data[col], errors='coerce')
@@ -35,44 +32,52 @@ for col in ['mass', 'soil_humidity', 'air_humidity', 'ldr', 'temperature']:
 # Drop rows with missing data
 clean_data = data[['timestamp', 'mass', 'soil_humidity', 'air_humidity', 'ldr', 'temperature']].dropna()
 
-# Add target: next time step's mass
+# Detect watering events using mass increase threshold
+threshold = 10  # grams
+clean_data['mass_diff'] = clean_data['mass'].diff()
+clean_data['is_watered'] = (clean_data['mass_diff'] > threshold).astype(int)
+print(clean_data[clean_data['is_watered'] == 1][['timestamp', 'mass', 'mass_diff']])
+
+# Add target variable (next time step's mass)
 clean_data['mass_next'] = clean_data['mass'].shift(-1)
 clean_data = clean_data.dropna()
 
 # Define features and target
-X = clean_data[['mass', 'soil_humidity', 'air_humidity', 'ldr', 'temperature']]
+X = clean_data[['mass', 'soil_humidity', 'air_humidity', 'ldr', 'temperature', 'is_watered']]
 y = clean_data['mass_next']
 
-# Split into training and testing (no shuffle to keep time order)
+# Train-test split
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
 
-# Train model
-model = LinearRegression()
+# Polynomial regression model (degree 2)
+model = make_pipeline(PolynomialFeatures(degree=2, include_bias=False), LinearRegression())
 model.fit(X_train, y_train)
 
 # Predict
 y_pred = model.predict(X_test)
 
-# Evaluate model
+# Evaluate
 mse = mean_squared_error(y_test, y_pred)
 r2 = r2_score(y_test, y_pred)
-coefficients = dict(zip(X.columns, model.coef_))
-intercept = model.intercept_
-
-# Print results
-print("=== Linear Regression Results ===")
+print("\n=== Polynomial Regression (Degree 2) with Watering Events ===")
 print(f"Mean Squared Error: {mse:.4f}")
 print(f"R² Score: {r2:.4f}")
+
+# Print expanded coefficients
+feature_names = model.named_steps['polynomialfeatures'].get_feature_names_out(X.columns)
+coefficients = model.named_steps['linearregression'].coef_
+intercept = model.named_steps['linearregression'].intercept_
+
 print(f"Intercept: {intercept:.4f}")
 print("Coefficients:")
-for feature, coef in coefficients.items():
-    print(f"  {feature}: {coef:.4f}")
+for name, coef in zip(feature_names, coefficients):
+    print(f"  {name}: {coef:.4f}")
 
-# Plot predictions vs actual values
+# Plot predictions
 plt.figure(figsize=(12, 6))
 plt.plot(y_test.values, label='Actual Mass', linewidth=2)
 plt.plot(y_pred, label='Predicted Mass', linestyle='--', linewidth=2)
-plt.title("Predicted vs Actual Mass (Next Time Step)")
+plt.title("Polynomial Regression with Watering Detection: Predicted vs Actual Mass")
 plt.xlabel("Sample Index")
 plt.ylabel("Mass (grams)")
 plt.legend()
