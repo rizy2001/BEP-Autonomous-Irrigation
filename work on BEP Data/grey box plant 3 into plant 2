@@ -1,0 +1,141 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import make_pipeline
+
+# === CONFIGURATION ===
+file_path = r"Data\Measurements From BEP Group 2021.xlsx"
+sheet_name = 'Edited copy 27-05-21 and onward'
+thresh_interp = 500
+water_thresh = 50
+
+# === Load and prepare data ===
+xls = pd.ExcelFile(file_path)
+df = xls.parse(sheet_name)
+data = df.iloc[3:].copy()
+
+# Shared sensor data
+data.columns.values[0] = 'timestamp'
+data.columns.values[7] = 'ldr'
+data.columns.values[11] = 'temperature'
+data.columns.values[12] = 'air_humidity'
+data['timestamp'] = pd.to_datetime(data['timestamp'])
+for col in ['ldr', 'temperature', 'air_humidity']:
+    data[col] = pd.to_numeric(data[col], errors='coerce')
+
+# === TRAINING on Plant 3 (mass: col 9, soil: col 10) ===
+data['mass'] = pd.to_numeric(data.iloc[:, 9], errors='coerce')
+data['soil_humidity'] = pd.to_numeric(data.iloc[:, 10], errors='coerce')
+data['mass'] = data['mass'].interpolate(method='linear', limit_direction='both')
+data = data.dropna(subset=['mass', 'ldr', 'temperature', 'air_humidity']).reset_index(drop=True)
+
+mass_diff = data['mass'].diff().fillna(0)
+data['is_watered'] = (mass_diff > water_thresh).astype(int)
+mass_phys = []
+start_idx = 0
+for i in range(1, len(data)):
+    if data['is_watered'].iloc[i] == 1:
+        end_idx = i
+        segment = data.iloc[start_idx:end_idx].copy()
+        segment['time_delta'] = (segment['timestamp'] - segment['timestamp'].iloc[0]).dt.total_seconds() / 60
+        segment['time_step'] = segment['time_delta'].diff().fillna(0)
+        segment['k'] = (0.00001 * segment['ldr'] + 0.00005 * segment['temperature'] + 0.0001 * (1 - segment['air_humidity'] / 100))
+        segment['k_integrated'] = (segment['k'] * segment['time_step']).cumsum()
+        m0 = segment['mass'].iloc[0]
+        dry_mass = segment['mass'].min()
+        segment['mass_phys'] = dry_mass + (m0 - dry_mass) * np.exp(-segment['k_integrated'])
+        mass_phys.append(segment[['mass_phys']])
+        start_idx = i
+segment = data.iloc[start_idx:].copy()
+segment['time_delta'] = (segment['timestamp'] - segment['timestamp'].iloc[0]).dt.total_seconds() / 60
+segment['time_step'] = segment['time_delta'].diff().fillna(0)
+segment['k'] = (0.00001 * segment['ldr'] + 0.00005 * segment['temperature'] + 0.0001 * (1 - segment['air_humidity'] / 100))
+segment['k_integrated'] = (segment['k'] * segment['time_step']).cumsum()
+m0 = segment['mass'].iloc[0]
+dry_mass = segment['mass'].min()
+segment['mass_phys'] = dry_mass + (m0 - dry_mass) * np.exp(-segment['k_integrated'])
+mass_phys.append(segment[['mass_phys']])
+data['mass_phys'] = pd.concat(mass_phys).reset_index(drop=True)
+data['residual'] = data['mass'] - data['mass_phys']
+features = ['ldr', 'temperature', 'air_humidity', 'soil_humidity']
+X_train = data[features]
+y_train = data['residual']
+residual_model = make_pipeline(StandardScaler(), LinearRegression())
+residual_model.fit(X_train, y_train)
+
+data['mass_corrected'] = data['mass_phys'] + residual_model.predict(X_train)
+
+# === APPLY TO PLANT 2 (mass: col 5, soil: col 6) ===
+plant2 = df.iloc[3:].copy()
+plant2.columns.values[0] = 'timestamp'
+plant2.columns.values[7] = 'ldr'
+plant2.columns.values[11] = 'temperature'
+plant2.columns.values[12] = 'air_humidity'
+plant2['timestamp'] = pd.to_datetime(plant2['timestamp'])
+plant2['ldr'] = pd.to_numeric(plant2['ldr'], errors='coerce')
+plant2['temperature'] = pd.to_numeric(plant2['temperature'], errors='coerce')
+plant2['air_humidity'] = pd.to_numeric(plant2['air_humidity'], errors='coerce')
+plant2['mass'] = pd.to_numeric(plant2.iloc[:, 5], errors='coerce')
+plant2['soil_humidity'] = pd.to_numeric(plant2.iloc[:, 6], errors='coerce')
+plant2['mass'] = plant2['mass'].interpolate(method='linear', limit_direction='both')
+plant2 = plant2.dropna(subset=['mass', 'ldr', 'temperature', 'air_humidity']).reset_index(drop=True)
+
+mass_diff = plant2['mass'].diff().fillna(0)
+plant2['is_watered'] = (mass_diff > water_thresh).astype(int)
+mass_phys = []
+start_idx = 0
+for i in range(1, len(plant2)):
+    if plant2['is_watered'].iloc[i] == 1:
+        end_idx = i
+        segment = plant2.iloc[start_idx:end_idx].copy()
+        segment['time_delta'] = (segment['timestamp'] - segment['timestamp'].iloc[0]).dt.total_seconds() / 60
+        segment['time_step'] = segment['time_delta'].diff().fillna(0)
+        segment['k'] = (0.00001 * segment['ldr'] + 0.00005 * segment['temperature'] + 0.0001 * (1 - segment['air_humidity'] / 100))
+        segment['k_integrated'] = (segment['k'] * segment['time_step']).cumsum()
+        m0 = segment['mass'].iloc[0]
+        dry_mass = segment['mass'].min()
+        segment['mass_phys'] = dry_mass + (m0 - dry_mass) * np.exp(-segment['k_integrated'])
+        mass_phys.append(segment[['mass_phys']])
+        start_idx = i
+segment = plant2.iloc[start_idx:].copy()
+segment['time_delta'] = (segment['timestamp'] - segment['timestamp'].iloc[0]).dt.total_seconds() / 60
+segment['time_step'] = segment['time_delta'].diff().fillna(0)
+segment['k'] = (0.00001 * segment['ldr'] + 0.00005 * segment['temperature'] + 0.0001 * (1 - segment['air_humidity'] / 100))
+segment['k_integrated'] = (segment['k'] * segment['time_step']).cumsum()
+m0 = segment['mass'].iloc[0]
+dry_mass = segment['mass'].min()
+segment['mass_phys'] = dry_mass + (m0 - dry_mass) * np.exp(-segment['k_integrated'])
+mass_phys.append(segment[['mass_phys']])
+plant2['mass_phys'] = pd.concat(mass_phys).reset_index(drop=True)
+
+X_plant2 = plant2[features]
+y_pred_residual = residual_model.predict(X_plant2)
+plant2['mass_corrected'] = plant2['mass_phys'] + y_pred_residual
+
+# === Side-by-side Comparison Plot ===
+fig, axs = plt.subplots(2, 1, figsize=(14, 10), sharex=True)
+axs[0].plot(data['timestamp'], data['mass'], label='Plant 3 Measured', linewidth=2)
+axs[0].plot(data['timestamp'], data['mass_phys'], label='Plant 3 Physics Model', linestyle='--')
+axs[0].plot(data['timestamp'], data['mass_corrected'], label='Plant 3 Corrected', linestyle='--')
+axs[0].scatter(data.loc[data['is_watered'] == 1, 'timestamp'], data.loc[data['is_watered'] == 1, 'mass'], color='red', label='Watering', zorder=10)
+axs[0].set_title("Plant 3: Training Data")
+axs[0].set_ylabel("Mass (g)")
+axs[0].legend()
+axs[0].grid(True)
+
+axs[1].plot(plant2['timestamp'], plant2['mass'], label='Plant 2 Measured', linewidth=2)
+axs[1].plot(plant2['timestamp'], plant2['mass_phys'], label='Plant 2 Physics Model', linestyle='--')
+axs[1].plot(plant2['timestamp'], plant2['mass_corrected'], label='Plant 2 Corrected', linestyle='--')
+axs[1].scatter(plant2.loc[plant2['is_watered'] == 1, 'timestamp'], plant2.loc[plant2['is_watered'] == 1, 'mass'], color='red', label='Watering', zorder=10)
+axs[1].set_title("Plant 2: Model Application")
+axs[1].set_xlabel("Timestamp")
+axs[1].set_ylabel("Mass (g)")
+axs[1].legend()
+axs[1].grid(True)
+
+plt.xticks(rotation=45)
+plt.tight_layout()
+plt.show()

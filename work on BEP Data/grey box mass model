@@ -1,0 +1,151 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.linear_model import LinearRegression
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import make_pipeline
+
+# === CONFIGURATION ===
+file_path = r"Data\Measurements From BEP Group 2021.xlsx"
+sheet_name = 'Edited copy 27-05-21 and onward'
+thresh_interp = 500  # threshold to remove sharp drops
+water_thresh = 50    # threshold to detect watering events
+
+# === Load and prepare data ===
+xls = pd.ExcelFile(file_path)
+df = xls.parse(sheet_name)
+data = df.iloc[3:].copy()
+
+# Rename columns for Plant 3 (training plant)
+data.columns.values[0] = 'timestamp'
+data.columns.values[9] = 'mass'
+data.columns.values[10] = 'soil_humidity'
+data.columns.values[7] = 'ldr'
+data.columns.values[12] = 'air_humidity'
+data.columns.values[11] = 'temperature'
+
+# Convert types
+data['timestamp'] = pd.to_datetime(data['timestamp'])
+for col in ['mass', 'soil_humidity', 'ldr', 'air_humidity', 'temperature']:
+    data[col] = pd.to_numeric(data[col], errors='coerce')
+
+# Drop and interpolate sharp mass drops
+def clean_mass_column(mass_series, threshold=500):
+    diff = mass_series.diff()
+    mask = diff < -threshold
+    cleaned = mass_series.copy()
+    cleaned[mask] = np.nan
+    return cleaned.interpolate(method='linear', limit_direction='both')
+
+data['mass'] = clean_mass_column(data['mass'], threshold=thresh_interp)
+
+# Drop NaNs
+data = data.dropna(subset=['mass', 'ldr', 'temperature', 'air_humidity']).reset_index(drop=True)
+
+# Detect watering events
+mass_diff = data['mass'].diff().fillna(0)
+data['is_watered'] = (mass_diff > water_thresh).astype(int)
+
+# Initialize physics model mass
+mass_phys = []
+start_idx = 0
+
+# Iterate through watering cycles to compute piecewise physics predictions
+for i in range(1, len(data)):
+    if data['is_watered'].iloc[i] == 1:
+        end_idx = i
+        segment = data.iloc[start_idx:end_idx].copy()
+
+        segment['time_delta'] = (segment['timestamp'] - segment['timestamp'].iloc[0]).dt.total_seconds() / 60
+        segment['time_step'] = segment['time_delta'].diff().fillna(0)
+        segment['k'] = (0.00001 * segment['ldr'] + 0.00005 * segment['temperature'] + 0.0001 * (1 - segment['air_humidity'] / 100))
+        segment['k_integrated'] = (segment['k'] * segment['time_step']).cumsum()
+
+        m0 = segment['mass'].iloc[0]
+        dry_mass = segment['mass'].min()
+        segment['mass_phys'] = dry_mass + (m0 - dry_mass) * np.exp(-segment['k_integrated'])
+
+        mass_phys.append(segment[['mass_phys']])
+        start_idx = i
+
+# Last segment
+segment = data.iloc[start_idx:].copy()
+segment['time_delta'] = (segment['timestamp'] - segment['timestamp'].iloc[0]).dt.total_seconds() / 60
+segment['time_step'] = segment['time_delta'].diff().fillna(0)
+segment['k'] = (0.00001 * segment['ldr'] + 0.00005 * segment['temperature'] + 0.0001 * (1 - segment['air_humidity'] / 100))
+segment['k_integrated'] = (segment['k'] * segment['time_step']).cumsum()
+m0 = segment['mass'].iloc[0]
+dry_mass = segment['mass'].min()
+segment['mass_phys'] = dry_mass + (m0 - dry_mass) * np.exp(-segment['k_integrated'])
+mass_phys.append(segment[['mass_phys']])
+
+# Combine all physics model mass predictions
+data['mass_phys'] = pd.concat(mass_phys).reset_index(drop=True)
+
+# === Step 2: Learn the residual ===
+data['residual'] = data['mass'] - data['mass_phys']
+
+# Features to predict residuals
+features = ['ldr', 'temperature', 'air_humidity', 'soil_humidity']
+X = data[features]
+y = data['residual']
+
+# Chronological split to prevent temporal leakage
+split_idx = int(0.8 * len(data))
+X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
+y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
+mass_phys_test = data['mass_phys'].iloc[split_idx:]
+timestamp_test = data['timestamp'].iloc[split_idx:]
+
+# Train correction model
+residual_model = make_pipeline(StandardScaler(), LinearRegression())
+residual_model.fit(X_train, y_train)
+
+# === Step 3: Predict and combine ===
+y_pred_residual = residual_model.predict(X_test)
+mass_final = mass_phys_test + y_pred_residual
+
+# Optional: clip final prediction to avoid overshoot
+mass_final = np.clip(mass_final, data['mass_phys'].min(), data['mass_phys'].max() + 50)
+
+# Evaluate
+mse = mean_squared_error(data['mass'].iloc[split_idx:], mass_final)
+r2 = r2_score(data['mass'].iloc[split_idx:], mass_final)
+mae = mean_absolute_error(data['mass'].iloc[split_idx:], mass_final)
+print(f"Grey-Box Model Evaluation:\nMSE: {mse:.2f}\nMAE: {mae:.2f}\nR2: {r2:.4f}")
+
+# Print model weights
+coefs = residual_model.named_steps['linearregression'].coef_
+intercept = residual_model.named_steps['linearregression'].intercept_
+print("\nResidual Model Coefficients:")
+for name, coef in zip(features, coefs):
+    print(f"  {name}: {coef:.6f}")
+print(f"Intercept: {intercept:.6f}")
+
+# === Step 4: Plot ===
+plt.figure(figsize=(14, 6))
+plt.plot(data['timestamp'], data['mass'], label='Measured Mass', linewidth=2)
+plt.plot(data['timestamp'], data['mass_phys'], label='Physics Model Mass', linestyle='--')
+plt.plot(timestamp_test, mass_final, label='Corrected (Final) Mass', linestyle='--')
+plt.title("Grey-Box Model: Mass Prediction")
+plt.xlabel("Timestamp")
+plt.ylabel("Mass (grams)")
+plt.xticks(rotation=45)
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+
+# === Plot Residuals ===
+plt.figure(figsize=(12, 4))
+plt.plot(timestamp_test, y_test, label='True Residual', color='black')
+plt.plot(timestamp_test, y_pred_residual, label='Predicted Residual', color='green', linestyle='--')
+plt.title("Residuals: True vs Predicted")
+plt.xlabel("Timestamp")
+plt.ylabel("Residual (grams)")
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.show()
