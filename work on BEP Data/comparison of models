@@ -1,0 +1,133 @@
+import pandas as pd
+import matplotlib.pyplot as plt
+from sklearn.linear_model import LinearRegression
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_squared_error, r2_score
+from sklearn.preprocessing import StandardScaler, PolynomialFeatures
+from sklearn.pipeline import make_pipeline
+import numpy as np
+
+# === CONFIGURATION ===
+file_path = r"Data\Measurements From BEP Group 2021.xlsx"
+sheet_name = 'Edited copy 27-05-21 and onward'
+watering_threshold = 75
+train_window = 0.7
+thresh_interp = 500
+
+# === Load data ===
+xls = pd.ExcelFile(file_path)
+df = xls.parse(sheet_name)
+data = df.iloc[3:].copy()
+
+# === Rename shared columns ===
+data.columns.values[0] = 'timestamp'
+data.columns.values[9] = 'mass'
+data.columns.values[10] = 'soil_humidity'
+data.columns.values[7] = 'ldr'
+data.columns.values[12] = 'air_humidity'
+data.columns.values[11] = 'temperature'
+
+data['timestamp'] = pd.to_datetime(data['timestamp'])
+for col in ['ldr', 'temperature', 'air_humidity', 'mass', 'soil_humidity']:
+    data[col] = pd.to_numeric(data[col], errors='coerce')
+
+# Drop and interpolate sharp mass drops
+def clean_mass_column(mass_series, threshold=500):
+    diff = mass_series.diff()
+    mask = diff < -threshold
+    cleaned = mass_series.copy()
+    cleaned[mask] = np.nan
+    return cleaned.interpolate(method='linear', limit_direction='both')
+
+# Drop NaNs in shared columns
+data = data.dropna(subset=['ldr', 'temperature', 'air_humidity']).reset_index(drop=True)
+
+def prepare_data(mass_col_idx, humidity_col_idx):
+    local = data.copy()
+    raw_mass = pd.to_numeric(local.iloc[:, mass_col_idx], errors='coerce')
+    local['mass'] = clean_mass_column(raw_mass, threshold=thresh_interp)
+    local['soil_humidity'] = pd.to_numeric(local.iloc[:, humidity_col_idx], errors='coerce')
+    local = local[['timestamp', 'mass', 'soil_humidity', 'air_humidity', 'ldr', 'temperature']].dropna().copy()
+    local['mass_diff'] = local['mass'].diff()
+    local['is_watered'] = (local['mass_diff'] > watering_threshold).astype(int)
+    local['mass_next'] = local['mass'].shift(-1)
+    local['mass_lag_1'] = local['mass'].shift(1)
+    local['soil_humidity_lag_1'] = local['soil_humidity'].shift(1)
+    local['mass_ma_3'] = local['mass'].rolling(window=3).mean()
+    local['soil_humidity_ma_3'] = local['soil_humidity'].rolling(window=3).mean()
+    return local.dropna().reset_index(drop=True)
+
+def run_models_on_data(train_data, title, models):
+    y = train_data['mass_next']
+    y_pred_results = {}
+    scores = {}
+
+    for name, (features, model) in models.items():
+        X = train_data[features]
+        y_pred = model.predict(X)
+        y_pred_results[name] = y_pred
+        scores[name] = {
+            'MSE': mean_squared_error(y, y_pred),
+            'R2': r2_score(y, y_pred)
+        }
+
+    fig, axes = plt.subplots(nrows=len(models), ncols=1, figsize=(14, 14), sharex=True)
+    for ax, (name, y_pred) in zip(axes, y_pred_results.items()):
+        ax.plot(train_data['timestamp'], train_data['mass_next'], label='Actual Mass', color='black', linewidth=2)
+        ax.plot(train_data['timestamp'], y_pred, label=f"{name} Prediction", linestyle='--')
+        ax.set_title(f"{name} Model - {title}\nMSE: {scores[name]['MSE']:.2f}  R2: {scores[name]['R2']:.4f}")
+        ax.set_ylabel("Mass (grams)")
+        ax.grid(True)
+        ax.legend()
+
+    axes[-1].set_xlabel("Timestamp")
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    plt.show()
+
+# === Train on Plant 3 ===
+plant3_data = prepare_data(9, 10)
+
+models = {
+    'Linear': (
+        ['mass', 'soil_humidity', 'air_humidity', 'ldr', 'temperature', 'is_watered'],
+        make_pipeline(StandardScaler(), LinearRegression())
+    ),
+    'Polynomial': (
+        ['mass', 'soil_humidity', 'air_humidity', 'ldr', 'temperature', 'is_watered'],
+        make_pipeline(StandardScaler(), PolynomialFeatures(degree=2, include_bias=False, interaction_only=True), LinearRegression())
+    ),
+    'Linear + Lag': (
+        ['mass', 'soil_humidity', 'air_humidity', 'ldr', 'temperature', 'is_watered', 'mass_lag_1', 'soil_humidity_lag_1'],
+        make_pipeline(StandardScaler(), LinearRegression())
+        
+    ),
+    'Polynomial + Lag': (
+        ['mass', 'soil_humidity', 'air_humidity', 'ldr', 'temperature', 'is_watered', 'mass_lag_1', 'soil_humidity_lag_1'],
+        make_pipeline(StandardScaler(), PolynomialFeatures(degree=2, include_bias=False, interaction_only=True), LinearRegression())
+    )#,
+   #'Linear + MA': (
+   #    ['mass_ma_3', 'soil_humidity_ma_3', 'air_humidity', 'ldr', 'temperature', 'is_watered'],
+   #    make_pipeline(StandardScaler(), LinearRegression())
+   #),
+   #'Polynomial + MA': (
+   #    ['mass_ma_3', 'soil_humidity_ma_3', 'air_humidity', 'ldr', 'temperature', 'is_watered'],
+   #    make_pipeline(StandardScaler(), PolynomialFeatures(degree=2, include_bias=False, interaction_only=True), LinearRegression())
+   #)
+}
+
+# Train all models on plant 3
+for _, (features, model) in models.items():
+    X_train = plant3_data[features]
+    y_train = plant3_data['mass_next']
+    model.fit(X_train, y_train)
+
+# === Show on Plant 3 ===
+run_models_on_data(plant3_data, "Plant 3", models)
+
+# === Apply trained models to other plants ===
+plant1_data = prepare_data(2, 3)
+run_models_on_data(plant1_data, "Plant 1", models)
+
+plant2_data = prepare_data(5, 6)
+run_models_on_data(plant2_data, "Plant 2", models)

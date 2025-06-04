@@ -1,0 +1,98 @@
+import pandas as pd
+import matplotlib.pyplot as plt
+from sklearn.linear_model import LinearRegression
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_squared_error, r2_score
+from sklearn.preprocessing import PolynomialFeatures, StandardScaler
+from sklearn.pipeline import make_pipeline
+
+# === CONFIGURATION ===
+file_path = r"Data\Measurements From BEP Group 2021.xlsx"
+sheet_name = 'Edited copy 27-05-21 and onward'
+watering_threshold = 75  # grams to consider a watering event
+drop_threshold = 500     # grams to clean bad mass drops
+
+# === Load data and skip metadata rows ===
+xls = pd.ExcelFile(file_path)
+df = xls.parse(sheet_name)
+data = df.iloc[3:].copy()
+
+# === Rename shared columns ===
+data.columns.values[0] = 'timestamp'
+data.columns.values[9] = 'mass'  # Plant 3 mass
+data.columns.values[10] = 'soil_humidity'  # Plant 3 soil humidity
+data.columns.values[7] = 'ldr'
+data.columns.values[12] = 'air_humidity'
+data.columns.values[11] = 'temperature'
+
+# Convert shared sensor values
+data['timestamp'] = pd.to_datetime(data['timestamp'])
+for col in ['ldr', 'temperature', 'air_humidity', 'mass', 'soil_humidity']:
+    data[col] = pd.to_numeric(data[col], errors='coerce')
+
+# === STEP 1: Train model on Plant 3 ===
+train_data = data[['timestamp', 'mass', 'soil_humidity', 'air_humidity', 'ldr', 'temperature']].dropna().copy()
+
+train_data['mass_diff'] = train_data['mass'].diff()
+train_data['is_watered'] = (train_data['mass_diff'] > watering_threshold).astype(int)
+train_data['mass_next'] = train_data['mass'].shift(-1)
+train_data = train_data.dropna().reset_index(drop=True)
+
+X = train_data[['mass', 'soil_humidity', 'air_humidity', 'ldr', 'temperature', 'is_watered']]
+y = train_data['mass_next']
+
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
+
+model = make_pipeline(
+    StandardScaler(),
+    PolynomialFeatures(degree=2, include_bias=False),
+    LinearRegression()
+)
+model.fit(X_train, y_train)
+
+# === STEP 2: Clean mass values with extreme drops ===
+def clean_mass_column(mass_series: pd.Series, threshold: float = 500) -> pd.Series:
+    mass_series = pd.to_numeric(mass_series, errors='coerce')
+    mass_diff = mass_series.diff()
+    bad_drops = mass_diff < -threshold
+    cleaned_mass = mass_series.copy()
+    cleaned_mass[bad_drops.index] = cleaned_mass[bad_drops.index].where(~bad_drops, pd.NA)
+    return cleaned_mass.interpolate(method='linear', limit_direction='both')
+
+# === STEP 3: Apply model to other plant data ===
+def apply_model_to_plant(plant_name, mass_col_idx, humidity_col_idx):
+    local = data.copy()
+    raw_mass = local.iloc[:, mass_col_idx]
+    local['mass'] = clean_mass_column(raw_mass, threshold=drop_threshold)
+    local['soil_humidity'] = pd.to_numeric(local.iloc[:, humidity_col_idx], errors='coerce')
+
+    local = local[['timestamp', 'mass', 'soil_humidity', 'air_humidity', 'ldr', 'temperature']].dropna().reset_index(drop=True)
+
+    local['mass_diff'] = local['mass'].diff()
+    local['is_watered'] = (local['mass_diff'] > watering_threshold).astype(int)
+    local = local.dropna().reset_index(drop=True)
+
+    X_new = local[['mass', 'soil_humidity', 'air_humidity', 'ldr', 'temperature', 'is_watered']]
+    y_pred = model.predict(X_new)
+
+    # Plot results
+    plt.figure(figsize=(14, 7))
+    plt.plot(local['timestamp'], local['mass'], label='Actual Mass', linewidth=2)
+    plt.plot(local['timestamp'], y_pred, label='Predicted Next Mass', linestyle='--', linewidth=2)
+    plt.scatter(local.loc[local['is_watered'] == 1, 'timestamp'],
+                local.loc[local['is_watered'] == 1, 'mass'],
+                color='red', marker='o', s=100, label='Watering Events')
+
+    plt.title(f"Model Prediction for {plant_name} (with Watering Detection)")
+    plt.xlabel("Timestamp")
+    plt.ylabel("Mass (grams)")
+    plt.xticks(rotation=45)
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
+
+# === STEP 3: Apply to Plant 1 and 2 ===
+apply_model_to_plant("Plant 1", mass_col_idx=2, humidity_col_idx=3)
+apply_model_to_plant("Plant 2", mass_col_idx=5, humidity_col_idx=6)
+apply_model_to_plant("Plant 3", mass_col_idx=9, humidity_col_idx=10)

@@ -1,15 +1,15 @@
 import pandas as pd
 import matplotlib.pyplot as plt
-from sklearn.linear_model import LinearRegression
+from sklearn.ensemble import RandomForestRegressor
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error, r2_score
-from sklearn.preprocessing import PolynomialFeatures, StandardScaler
+from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import make_pipeline
 
 # === CONFIGURATION ===
 file_path = r"Data\Measurements From BEP Group 2021.xlsx"
 sheet_name = 'Edited copy 27-05-21 and onward'
-watering_threshold = 100  # grams to consider a watering event
+watering_threshold = 75  # grams to consider a watering event
 drop_threshold = 500     # grams to clean bad mass drops
 
 # === Load data and skip metadata rows ===
@@ -30,27 +30,34 @@ data['timestamp'] = pd.to_datetime(data['timestamp'])
 for col in ['ldr', 'temperature', 'air_humidity', 'mass', 'soil_humidity']:
     data[col] = pd.to_numeric(data[col], errors='coerce')
 
-# === STEP 1: Train model on Plant 3 ===
+# === STEP 1: Train model on entire Plant 3 data ===
 train_data = data[['timestamp', 'mass', 'soil_humidity', 'air_humidity', 'ldr', 'temperature']].dropna().copy()
-
 train_data['mass_diff'] = train_data['mass'].diff()
 train_data['is_watered'] = (train_data['mass_diff'] > watering_threshold).astype(int)
 train_data['mass_next'] = train_data['mass'].shift(-1)
+
+# Add moving averages
+window_size = 3
+train_data['mass_MA'] = train_data['mass'].rolling(window=window_size).mean()
+train_data['soil_humidity_MA'] = train_data['soil_humidity'].rolling(window=window_size).mean()
+train_data['air_humidity_MA'] = train_data['air_humidity'].rolling(window=window_size).mean()
+train_data['ldr_MA'] = train_data['ldr'].rolling(window=window_size).mean()
+train_data['temperature_MA'] = train_data['temperature'].rolling(window=window_size).mean()
+
 train_data = train_data.dropna().reset_index(drop=True)
 
-X = train_data[['mass', 'soil_humidity', 'air_humidity', 'ldr', 'temperature', 'is_watered']]
+X = train_data[[
+    'mass', 'soil_humidity', 'air_humidity', 'ldr', 'temperature', 'is_watered',
+    'mass_MA', 'soil_humidity_MA', 'air_humidity_MA', 'ldr_MA', 'temperature_MA']
+]
 y = train_data['mass_next']
 
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
 
-model = make_pipeline(
-    StandardScaler(),
-    PolynomialFeatures(degree=2, include_bias=False),
-    LinearRegression()
-)
+model = RandomForestRegressor(n_estimators=100, random_state=42)
 model.fit(X_train, y_train)
 
-# === STEP 1.5: Clean mass values with extreme drops ===
+# === STEP 2: Clean mass values with extreme drops ===
 def clean_mass_column(mass_series: pd.Series, threshold: float = 500) -> pd.Series:
     mass_series = pd.to_numeric(mass_series, errors='coerce')
     mass_diff = mass_series.diff()
@@ -59,7 +66,7 @@ def clean_mass_column(mass_series: pd.Series, threshold: float = 500) -> pd.Seri
     cleaned_mass[bad_drops.index] = cleaned_mass[bad_drops.index].where(~bad_drops, pd.NA)
     return cleaned_mass.interpolate(method='linear', limit_direction='both')
 
-# === STEP 2: Apply model to other plant data ===
+# === STEP 3: Apply model to other plant data ===
 def apply_model_to_plant(plant_name, mass_col_idx, humidity_col_idx):
     local = data.copy()
     raw_mass = local.iloc[:, mass_col_idx]
@@ -70,9 +77,23 @@ def apply_model_to_plant(plant_name, mass_col_idx, humidity_col_idx):
 
     local['mass_diff'] = local['mass'].diff()
     local['is_watered'] = (local['mass_diff'] > watering_threshold).astype(int)
+
+    # Add moving averages that reset after watering
+    for col in ['mass', 'soil_humidity', 'air_humidity', 'ldr', 'temperature']:
+        ma_col = f"{col}_MA"
+        local[ma_col] = pd.NA
+        start_idx = 0
+        for idx in local.index[local['is_watered'] == 1]:
+            local.loc[start_idx:idx, ma_col] = local.loc[start_idx:idx, col].rolling(window=window_size, min_periods=1).mean()
+            start_idx = idx + 1
+        local.loc[start_idx:, ma_col] = local.loc[start_idx:, col].rolling(window=window_size, min_periods=1).mean()
+
     local = local.dropna().reset_index(drop=True)
 
-    X_new = local[['mass', 'soil_humidity', 'air_humidity', 'ldr', 'temperature', 'is_watered']]
+    X_new = local[[
+        'mass', 'soil_humidity', 'air_humidity', 'ldr', 'temperature', 'is_watered',
+        'mass_MA', 'soil_humidity_MA', 'air_humidity_MA', 'ldr_MA', 'temperature_MA']
+    ]
     y_pred = model.predict(X_new)
 
     # Plot results
@@ -83,7 +104,7 @@ def apply_model_to_plant(plant_name, mass_col_idx, humidity_col_idx):
                 local.loc[local['is_watered'] == 1, 'mass'],
                 color='red', marker='o', s=100, label='Watering Events')
 
-    plt.title(f"Model Prediction for {plant_name} (with Watering Detection)")
+    plt.title(f"Model Prediction for {plant_name} (Random Forest Trained on Full Plant 3 Data)")
     plt.xlabel("Timestamp")
     plt.ylabel("Mass (grams)")
     plt.xticks(rotation=45)
@@ -92,6 +113,7 @@ def apply_model_to_plant(plant_name, mass_col_idx, humidity_col_idx):
     plt.tight_layout()
     plt.show()
 
-# === STEP 3: Apply to Plant 1 and 2 ===
+# === STEP 4: Apply to Plant 1 and 2 ===
 apply_model_to_plant("Plant 1", mass_col_idx=2, humidity_col_idx=3)
 apply_model_to_plant("Plant 2", mass_col_idx=5, humidity_col_idx=6)
+apply_model_to_plant("Plant 3", mass_col_idx=9, humidity_col_idx=10)
