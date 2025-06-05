@@ -1,0 +1,42 @@
+import pandas as pd
+
+# === Load data ===
+file_path = "Data\Wageningen 2nd greenhouse challenge automatoes data.xlsx"
+df = pd.read_excel(file_path, sheet_name="Combined")
+
+# === Convert and clean ===
+df = df.rename(columns={'%time': 'timestamp'})
+df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
+df['water_sup'] = pd.to_numeric(df['water_sup'], errors='coerce')
+df['WC_slab1'] = pd.to_numeric(df['WC_slab1'], errors='coerce')
+
+# === Filter for March 2020 ===
+df = df[(df['timestamp'].dt.month == 3) & (df['timestamp'].dt.year == 2020)]
+
+# === Detect water supplied events ===
+df['water_sup_diff'] = df['water_sup'].diff().fillna(0)
+df['water_supplied'] = df['water_sup_diff'] > 0
+
+# === Identify post-watering periods ===
+df['date'] = df['timestamp'].dt.date
+drydown_data = []
+
+for date in sorted(df['date'].unique()):
+    day_data = df[df['date'] == date]
+
+    # Find last watering index of the day
+    water_supplied = day_data[day_data['water_supplied']]
+    if water_supplied.empty:
+        continue
+
+    last_water_time = water_supplied['timestamp'].max()
+    post_water_data = day_data[day_data['timestamp'] > last_water_time].copy()
+
+    if not post_water_data.empty:
+        post_water_data['drydown_day'] = date
+        drydown_data.append(post_water_data)
+
+# === Combine and export ===
+df_post_water = pd.concat(drydown_data)
+df_post_water = df_post_water.sort_values('timestamp')
+df_post_water.to_excel("Post water event March.xlsx", sheet_name="Post water event March", index=False)

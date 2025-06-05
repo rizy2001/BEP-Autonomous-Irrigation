@@ -1,0 +1,78 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.metrics import r2_score, mean_squared_error
+from scipy.optimize import curve_fit
+
+# === Load and prepare data ===
+file_path = r"Data\Wageningen 2nd greenhouse challenge automatoes data.xlsx"
+df = pd.read_excel(file_path, sheet_name="Post water event March")
+
+df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
+df['WC_slab1'] = pd.to_numeric(df['WC_slab1'], errors='coerce')
+df['drydown_day'] = pd.to_datetime(df['drydown_day'], errors='coerce').dt.date
+df = df.dropna(subset=['WC_slab1', 'timestamp', 'drydown_day'])
+
+df['minutes_since_start'] = df.groupby('drydown_day')['timestamp'].transform(
+    lambda x: (x - x.min()).dt.total_seconds() / 60
+)
+
+# === Define models ===
+def linear_model(t, r, wc0):
+    return wc0 - r * t
+
+def exp_model(t, k, wc0, wc_min):
+    return wc_min + (wc0 - wc_min) * np.exp(-k * t)
+
+# === Get last 3 days ===
+last_3_days = sorted(df['drydown_day'].unique())[-3:]
+
+# === Plot comparisons with annotations ===
+plt.figure(figsize=(12, 10))
+
+for i, day in enumerate(last_3_days, 1):
+    segment = df[df['drydown_day'] == day].copy()
+    t = segment['minutes_since_start'].values
+    y = segment['WC_slab1'].values
+    ts = segment['timestamp'].values
+
+    if len(t) < 5:
+        continue
+
+    # Fit linear model
+    lin_params, _ = curve_fit(linear_model, t, y, p0=[0.01, y[0]])
+    y_lin = linear_model(t, *lin_params)
+    r2_lin = r2_score(y, y_lin)
+    mse_lin = mean_squared_error(y, y_lin)
+
+    # Fit exponential model
+    exp_params, _ = curve_fit(exp_model, t, y, p0=[0.01, y[0], y[-1]])
+    y_exp = exp_model(t, *exp_params)
+    r2_exp = r2_score(y, y_exp)
+    mse_exp = mean_squared_error(y, y_exp)
+
+    # Print stats
+    print(f"=== {day} ===")
+    print(f"Linear R²: {r2_lin:.4f}, MSE: {mse_lin:.6f}")
+    print(f"Exponential R²: {r2_exp:.4f}, MSE: {mse_exp:.6f}")
+    print()
+
+    # Plot
+    plt.subplot(3, 1, i)
+    plt.plot(ts, y, label='Actual', marker='o')
+    plt.plot(ts, y_lin, label='Linear Fit', linestyle='--')
+    plt.plot(ts, y_exp, label='Exponential Fit', linestyle=':')
+    plt.title(f"{day}")
+    plt.ylabel("WC_slab1")
+    plt.legend()
+    plt.grid(True)
+
+    # Add text box with metrics
+    text = (f"Linear R²: {r2_lin:.3f}, MSE: {mse_lin:.5f}\n"
+            f"Exp R²:    {r2_exp:.3f}, MSE: {mse_exp:.5f}")
+    plt.text(0.01, 0.01, text, transform=plt.gca().transAxes,
+             fontsize=9, verticalalignment='bottom', bbox=dict(facecolor='white', alpha=0.6))
+
+plt.xlabel("Time")
+plt.tight_layout()
+plt.show()

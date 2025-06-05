@@ -1,0 +1,122 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import r2_score, mean_squared_error
+from scipy.optimize import curve_fit
+
+# === Load and clean data ===
+file_path = r"Data\Wageningen 2nd greenhouse challenge automatoes data.xlsx"
+df = pd.read_excel(file_path, sheet_name="Post water event March")
+
+df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
+df['WC_slab1'] = pd.to_numeric(df['WC_slab1'], errors='coerce')
+df['Tair'] = pd.to_numeric(df['Tair'], errors='coerce')
+df['Tot_PAR'] = pd.to_numeric(df['Tot_PAR'], errors='coerce')
+df['Rhair'] = pd.to_numeric(df['Rhair'], errors='coerce')
+df['CO2air'] = pd.to_numeric(df['CO2air'], errors='coerce')
+df['drydown_day'] = pd.to_datetime(df['drydown_day'], errors='coerce').dt.date
+
+df = df.dropna(subset=['WC_slab1', 'timestamp', 'Tair', 'Tot_PAR', 'Rhair', 'CO2air', 'drydown_day'])
+df['minutes_since_start'] = df.groupby('drydown_day')['timestamp'].transform(
+    lambda x: (x - x.min()).dt.total_seconds() / 60
+)
+
+# Create lag features
+df['WC_prev1'] = df.groupby('drydown_day')['WC_slab1'].shift(1)
+df['WC_prev2'] = df.groupby('drydown_day')['WC_slab1'].shift(2)
+df['WC_prev3'] = df.groupby('drydown_day')['WC_slab1'].shift(3)
+
+# === Define linear drydown model ===
+def linear_model(t, r, wc0):
+    return wc0 - r * t
+
+# === Split drydown days ===
+unique_days = sorted(df['drydown_day'].unique())
+split_index = int(len(unique_days) * 0.8)
+train_days = unique_days[:split_index]
+test_days = unique_days[split_index:]
+
+# === Train residual model on 80% ===
+train_segments = []
+for day in train_days:
+    seg = df[df['drydown_day'] == day].copy()
+    seg['WC_prev1'] = seg['WC_slab1'].shift(1)
+    seg['WC_prev2'] = seg['WC_slab1'].shift(2)
+    seg['WC_prev3'] = seg['WC_slab1'].shift(3)
+    t = seg['minutes_since_start'].values
+    y = seg['WC_slab1'].values
+    if len(t) < 5:
+        continue
+    try:
+        popt, _ = curve_fit(linear_model, t, y, p0=[0.01, y[0]])
+        seg['lin_pred'] = linear_model(t, *popt)
+        seg['residual'] = seg['WC_slab1'] - seg['lin_pred']
+        seg = seg.dropna(subset=['WC_prev1', 'WC_prev2', 'WC_prev3'])
+        train_segments.append(seg)
+    except:
+        continue
+
+train_df = pd.concat(train_segments)
+X_train = train_df[['Tair', 'Tot_PAR', 'Rhair', 'CO2air', 'WC_prev1', 'WC_prev2', 'WC_prev3']]
+y_train = train_df['residual']
+residual_model = LinearRegression().fit(X_train, y_train)
+
+# === Evaluate on 20% test days ===
+results = []
+plt.figure(figsize=(12, len(test_days) * 3))
+
+for i, day in enumerate(test_days, 1):
+    seg = df[df['drydown_day'] == day].copy()
+    seg['WC_prev1'] = seg['WC_slab1'].shift(1)
+    seg['WC_prev2'] = seg['WC_slab1'].shift(2)
+    seg['WC_prev3'] = seg['WC_slab1'].shift(3)
+    t = seg['minutes_since_start'].values
+    y = seg['WC_slab1'].values
+    if len(t) < 5:
+        continue
+    try:
+        popt, _ = curve_fit(linear_model, t, y, p0=[0.01, y[0]])
+        seg['lin_pred'] = linear_model(t, *popt)
+
+        seg = seg.dropna(subset=['WC_prev1', 'WC_prev2', 'WC_prev3'])
+        X_test = seg[['Tair', 'Tot_PAR', 'Rhair', 'CO2air', 'WC_prev1', 'WC_prev2', 'WC_prev3']]
+        seg['residual_pred'] = residual_model.predict(X_test)
+        seg['WC_combined'] = seg['lin_pred'] + seg['residual_pred']
+
+        r2_lin = r2_score(seg['WC_slab1'], seg['lin_pred'])
+        rmse_lin = mean_squared_error(seg['WC_slab1'], seg['lin_pred']) ** 0.5
+        r2_comb = r2_score(seg['WC_slab1'], seg['WC_combined'])
+        rmse_comb = mean_squared_error(seg['WC_slab1'], seg['WC_combined']) ** 0.5
+
+        results.append({
+            'day': day,
+            'r2_linear': r2_lin,
+            'rmse_linear': rmse_lin,
+            'r2_greybox': r2_comb,
+            'rmse_greybox': rmse_comb
+        })
+
+        plt.subplot(len(test_days), 1, i)
+        plt.plot(seg['timestamp'], seg['WC_slab1'], label='Actual', marker='o')
+        plt.plot(seg['timestamp'], seg['lin_pred'], label='Linear Model', linestyle='--')
+        plt.plot(seg['timestamp'], seg['WC_combined'], label='Grey-box Model', linestyle=':')
+        plt.title(f"{day}")
+        plt.ylabel("WC")
+        plt.legend()
+        plt.grid(True)
+
+        text = f"R² Lin: {r2_lin:.3f}, RMSE Lin: {rmse_lin:.4f} | R² Grey: {r2_comb:.3f}, RMSE Grey: {rmse_comb:.4f}"
+        plt.text(0.01, 0.01, text, transform=plt.gca().transAxes, fontsize=8,
+                 verticalalignment='bottom', bbox=dict(facecolor='white', alpha=0.6))
+    except:
+        continue
+
+plt.xlabel("Time")
+plt.tight_layout()
+plt.show()
+
+# === Results Summary ===
+results_df = pd.DataFrame(results)
+print("Model performance on test days:\n")
+print(results_df.sort_values(by='day').to_string(index=False))
