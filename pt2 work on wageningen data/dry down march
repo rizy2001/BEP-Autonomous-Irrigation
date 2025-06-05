@@ -1,0 +1,53 @@
+import pandas as pd
+import matplotlib.pyplot as plt
+
+# Load the Excel sheet
+file_path = "Data\Wageningen 2nd greenhouse challenge automatoes data.xlsx"
+df_post_water = pd.read_excel(file_path, sheet_name="Post water event March")
+
+# Prepare datetime columns
+df_post_water['timestamp'] = pd.to_datetime(df_post_water['timestamp'], errors='coerce')
+df_post_water['WC_slab1'] = pd.to_numeric(df_post_water['WC_slab1'], errors='coerce')
+df_post_water['drydown_day'] = pd.to_datetime(df_post_water['drydown_day'], errors='coerce').dt.date
+
+# === 1. Full March Drydown Plot ===
+plt.figure(figsize=(12, 6))
+for day, group in df_post_water.groupby('drydown_day'):
+    plt.plot(group['timestamp'], group['WC_slab1'], label=str(day))
+plt.xlabel("Time")
+plt.ylabel("Water Content (Slab 1)")
+plt.title("Water Content Decline – Full March")
+plt.xticks(rotation=45)
+plt.legend(title="Drydown Day", bbox_to_anchor=(1.05, 1), loc='upper left')
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+
+# === 2. Last Week of March ===
+last_week_days = pd.date_range("2020-03-25", "2020-03-31").date
+last_week_data = df_post_water[df_post_water['drydown_day'].isin(last_week_days)]
+
+plt.figure(figsize=(12, 6))
+for day, group in last_week_data.groupby('drydown_day'):
+    plt.plot(group['timestamp'], group['WC_slab1'], label=str(day))
+plt.xlabel("Time")
+plt.ylabel("Water Content (Slab 1)")
+plt.title("Water Content Decline – Last Week of March")
+plt.xticks(rotation=45)
+plt.legend(title="Drydown Day", bbox_to_anchor=(1.05, 1), loc='upper left')
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+
+# === 3. Last Day of March ===
+last_day_data = df_post_water[df_post_water['drydown_day'] == pd.to_datetime("2020-03-30").date()]
+
+plt.figure(figsize=(12, 6))
+plt.plot(last_day_data['timestamp'], last_day_data['WC_slab1'], color='blue')
+plt.xlabel("Time")
+plt.ylabel("Water Content (Slab 1)")
+plt.title("Water Content Decline – March 30")
+plt.xticks(rotation=45)
+plt.grid(True)
+plt.tight_layout()
+plt.show()

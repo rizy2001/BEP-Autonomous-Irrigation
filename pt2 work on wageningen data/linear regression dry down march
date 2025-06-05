@@ -1,0 +1,110 @@
+import pandas as pd
+import matplotlib.pyplot as plt
+from sklearn.linear_model import LinearRegression
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import r2_score, mean_squared_error
+
+# === Load Excel ===
+file_path = r"Data\Wageningen 2nd greenhouse challenge automatoes data.xlsx"
+df = pd.read_excel(file_path, sheet_name="Post water event March")
+
+# === Clean & Prepare ===
+df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
+df['WC_slab1'] = pd.to_numeric(df['WC_slab1'], errors='coerce')
+df['Tair'] = pd.to_numeric(df['Tair'], errors='coerce')
+df['Tot_PAR'] = pd.to_numeric(df['Tot_PAR'], errors='coerce')
+df['Rhair'] = pd.to_numeric(df['Rhair'], errors='coerce')
+df['drydown_day'] = pd.to_datetime(df['drydown_day'], errors='coerce').dt.date
+df['CO2air'] = pd.to_numeric(df['CO2air'], errors='coerce')
+
+# Lag features
+df['WC_slab1_prev1'] = df.groupby('drydown_day')['WC_slab1'].shift(1)
+df['WC_slab1_prev2'] = df.groupby('drydown_day')['WC_slab1'].shift(2)
+df['WC_slab1_prev3'] = df.groupby('drydown_day')['WC_slab1'].shift(3)
+
+df = df.dropna(subset=[
+    'WC_slab1', 'timestamp', 'Tair', 'Tot_PAR', 'Rhair',
+    'drydown_day', 'CO2air', 'WC_slab1_prev1', 'WC_slab1_prev2', 'WC_slab1_prev3'
+])
+
+# Add minutes since drydown start
+df['minutes_since_start'] = df.groupby('drydown_day')['timestamp'].transform(
+    lambda x: (x - x.min()).dt.total_seconds() / 60
+)
+
+# === Prepare model input ===
+X = df[['minutes_since_start', 'Tair', 'Tot_PAR', 'Rhair', 'CO2air',
+        'WC_slab1_prev1', 'WC_slab1_prev2', 'WC_slab1_prev3']]
+y = df['WC_slab1']
+
+# === Split data into training and testing sets ===
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+# === Train model ===
+model = LinearRegression()
+model.fit(X_train, y_train)
+
+# === Evaluate on test set ===
+y_pred_test = model.predict(X_test)
+r2 = r2_score(y_test, y_pred_test)
+mse = mean_squared_error(y_test, y_pred_test)
+print(f"R² score on test set: {r2:.9f}")
+print(f"MSE on test set: {mse:.3f}")
+
+# === Print coefficients ===
+for name, coef in zip(X.columns, model.coef_):
+    print(f"{name}: {coef:.4f}")
+
+# === Predict over full dataset for visualization ===
+df['WC_pred'] = model.predict(X)
+
+# === Visualise last 3 days ===
+last_3_days = sorted(df['drydown_day'].unique())[-3:]
+
+plt.figure(figsize=(12, 6))
+for day in last_3_days:
+    day_data = df[df['drydown_day'] == day]
+    plt.plot(day_data['timestamp'], day_data['WC_slab1'], label=f"{day} Actual", marker='o')
+    plt.plot(day_data['timestamp'], day_data['WC_pred'], label=f"{day} Predicted", linestyle='--')
+
+plt.xlabel("Time")
+plt.ylabel("Water Content (Slab 1)")
+plt.title("Predicted vs Actual Water Content – Last 3 Days of March")
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+
+# === Plot last 7 days ===
+last_7_days = sorted(df['drydown_day'].unique())[-7:]
+fig, axes = plt.subplots(nrows=7, ncols=1, figsize=(10, 18), sharex=False)
+fig.suptitle("Predicted vs Actual Water Content – Last 7 Days of March", fontsize=16)
+
+for ax, day in zip(axes, last_7_days):
+    day_data = df[df['drydown_day'] == day]
+    ax.plot(day_data['timestamp'], day_data['WC_slab1'], label='Actual WC', marker='o')
+    ax.plot(day_data['timestamp'], day_data['WC_pred'], label='Predicted WC', linestyle='--')
+    ax.set_title(f"{day}")
+    ax.set_ylabel("WC")
+    ax.grid(True)
+    ax.legend()
+
+axes[-1].set_xlabel("Time")
+plt.tight_layout(rect=[0, 0, 1, 0.97])
+plt.show()
+
+# === Error Calculation and Plot ===
+df['error'] = df['WC_pred'] - df['WC_slab1']
+plt.figure(figsize=(12, 6))
+for day in last_7_days:
+    day_data = df[df['drydown_day'] == day]
+    plt.plot(day_data['timestamp'], day_data['error'], label=str(day))
+
+plt.axhline(0, color='black', linestyle='--', linewidth=1)
+plt.xlabel("Time")
+plt.ylabel("Prediction Error (Predicted - Actual WC)")
+plt.title("Prediction Error Over Time – Last 7 Days of March")
+plt.legend(title="Drydown Day", bbox_to_anchor=(1.05, 1), loc='upper left')
+plt.grid(True)
+plt.tight_layout()
+plt.show()
