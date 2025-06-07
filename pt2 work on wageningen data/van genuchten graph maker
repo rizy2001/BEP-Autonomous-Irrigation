@@ -1,0 +1,156 @@
+import pandas as pd
+import numpy as np
+from scipy.optimize import curve_fit
+from sklearn.metrics import r2_score, mean_squared_error
+import matplotlib.pyplot as plt
+
+# === CONFIGURATION ===
+FILE_PATH = r"Data\Wageningen 2nd greenhouse challenge automatoes data.xlsx"
+SHEET_NAME = "March"
+
+def van_genuchten(h, theta_r, theta_s, alpha, n):
+    m = 1 - 1 / n
+    return theta_r + (theta_s - theta_r) / ((1 + (alpha * h)**n) ** m)
+
+# === LOAD & CLEAN DATA ===
+df = pd.read_excel(FILE_PATH, sheet_name=SHEET_NAME)
+df = df[['%time', 'WC_slab1', 'water_sup', 'Tot_PAR', 'Tair']]
+df.columns = ['timestamp', 'WC_slab1', 'water_sup', 'Tot_PAR', 'Tair']
+for col in ['WC_slab1', 'water_sup', 'Tot_PAR', 'Tair']:
+    df[col] = pd.to_numeric(df[col].astype(str).str.replace(',', '.'), errors='coerce')
+df.dropna(inplace=True)
+df['timestamp'] = pd.to_datetime(df['timestamp'])
+df.sort_values('timestamp', inplace=True)
+df['date'] = df['timestamp'].dt.date
+
+# === FIT MODEL ON ALL VALID DAYS ===
+fit_results = []
+
+for date, group in df.groupby('date'):
+    group = group.copy()
+    group['water_sup_diff'] = group['water_sup'].diff().fillna(0)
+    group['new_watering'] = group['water_sup_diff'] > 0
+    group['event_id'] = group['new_watering'].cumsum()
+
+    max_drydown = None
+    max_drop = -np.inf
+    for _, segment in group.groupby('event_id'):
+        if len(segment) < 6:
+            continue
+        drop = segment['WC_slab1'].iloc[0] - segment['WC_slab1'].iloc[-1]
+        if drop > max_drop:
+            max_drop = drop
+            max_drydown = segment.copy()
+
+    if max_drydown is None:
+        continue
+
+    segment = max_drydown.copy()
+    segment['time'] = (segment['timestamp'] - segment['timestamp'].min()).dt.total_seconds() / 3600
+    theta_min = segment['WC_slab1'].min()
+    theta_max = segment['WC_slab1'].max()
+    if theta_max == theta_min:
+        continue
+    segment['theta'] = (segment['WC_slab1'] - theta_min) / (theta_max - theta_min)
+    segment['h_sim'] = np.exp(segment['time'] / segment['time'].max() * 5)
+
+    h = segment['h_sim'].values
+    theta = segment['theta'].values
+
+    try:
+        vg_params, _ = curve_fit(van_genuchten, h, theta,
+                                 p0=[0.05, 1.0, 0.05, 2.0],
+                                 bounds=([0, 0.8, 0.0001, 1.1], [0.5, 1.2, 1.0, 5.0]),
+                                 maxfev=10000)
+        pred = van_genuchten(h, *vg_params)
+        r2 = r2_score(theta, pred)
+        rmse = np.sqrt(mean_squared_error(theta, pred))
+        error = theta - pred
+
+        fit_results.append({
+            'date': date,
+            'r2': r2,
+            'rmse': rmse,
+            'segment': segment,
+            'prediction': pred,
+            'error': error
+        })
+    except:
+        continue
+
+# === IDENTIFY BEST & WORST FITS ===
+fit_results.sort(key=lambda x: x['r2'])
+worst = fit_results[0]
+best = fit_results[-1]
+'''
+# === PLOT COMPARISONS ===
+for label, res in zip(["Worst Fit", "Best Fit"], [worst, best]):
+    segment = res['segment']
+    pred = res['prediction']
+    error = res['error']
+
+    # Fit Plot
+    plt.figure(figsize=(7, 4))
+    plt.plot(segment['time'], segment['theta'], 'o', label='Observed')
+    plt.plot(segment['time'], pred, '-', label='Van Genuchten Fit')
+    plt.title(f"{label} – {res['date']} | R²: {res['r2']:.3f}, RMSE: {res['rmse']:.3f}")
+    plt.xlabel('Time (h)')
+    plt.ylabel('Normalized WC')
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
+
+    # Error Plot
+    plt.figure(figsize=(7, 3))
+    plt.plot(segment['time'], error, marker='o')
+    plt.axhline(0, color='gray', linestyle='--')
+    plt.title(f"{label} Error – {res['date']}")
+    plt.xlabel('Time (h)')
+    plt.ylabel('Error')
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
+''' 
+
+# === SIDE-BY-SIDE FIT PLOT ===
+fig, axes = plt.subplots(1, 2, figsize=(14, 5), sharey=True)
+
+for ax, label, res in zip(axes, ["Worst Fit", "Best Fit"], [worst, best]):
+    segment = res['segment']
+    pred = res['prediction']
+    ax.plot(segment['time'], segment['theta'], 'o', label='Observed')
+    ax.plot(segment['time'], pred, '-', label='Van Genuchten Fit')
+    ax.set_title(f"{label} – {res['date']}\nR²: {res['r2']:.3f}, RMSE: {res['rmse']:.3f}")
+    ax.set_xlabel('Time (h)')
+    ax.set_ylabel('Normalized WC')
+    ax.grid(True)
+    ax.legend()
+
+plt.suptitle("Van Genuchten Model Fits: Best vs Worst", fontsize=14)
+plt.tight_layout(rect=[0, 0, 1, 0.95])
+plt.show()
+
+# === SIDE-BY-SIDE ERROR PLOT ===
+fig, axes = plt.subplots(1, 2, figsize=(14, 4), sharey=True)
+
+for ax, label, res in zip(axes, ["Worst Fit", "Best Fit"], [worst, best]):
+    segment = res['segment']
+    error = res['error']
+    ax.plot(segment['time'], error, marker='o')
+    ax.axhline(0, color='gray', linestyle='--')
+    ax.set_title(f"{label} Error – {res['date']}")
+    ax.set_xlabel('Time (h)')
+    ax.set_ylabel('Error')
+    ax.grid(True)
+
+plt.suptitle("Van Genuchten Model Prediction Errors", fontsize=14)
+plt.tight_layout(rect=[0, 0, 1, 0.95])
+plt.show()
+
+# === PRINT METRICS ===
+for label, res in zip(["Worst Fit", "Best Fit"], [worst, best]):
+    print(f"{label} – {res['date']}")
+    print(f"  R²: {res['r2']:.4f}")
+    print(f"  RMSE: {res['rmse']:.4f}")
+    print()

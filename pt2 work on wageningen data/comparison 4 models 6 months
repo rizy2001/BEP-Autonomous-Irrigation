@@ -1,0 +1,194 @@
+import pandas as pd
+import numpy as np
+from scipy.optimize import curve_fit
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import r2_score
+import matplotlib.pyplot as plt
+
+# === CONFIGURATION ===
+FILE_PATH = r"Data\Wageningen 2nd greenhouse challenge automatoes data.xlsx"
+SHEET_NAME = "Combined"
+
+# === LOAD & CLEAN DATA ===
+df = pd.read_excel(FILE_PATH, sheet_name=SHEET_NAME)
+df = df[['%time', 'WC_slab1', 'water_sup']].copy()
+df.columns = ['timestamp', 'WC_slab1', 'water_sup']
+
+df['timestamp'] = pd.to_datetime(df['timestamp'])
+df['WC_slab1'] = df['WC_slab1'].astype(str).str.replace(',', '.')
+df['water_sup'] = df['water_sup'].astype(str).str.replace(',', '.')
+df['WC_slab1'] = pd.to_numeric(df['WC_slab1'], errors='coerce')
+df['water_sup'] = pd.to_numeric(df['water_sup'], errors='coerce')
+df.dropna(subset=['timestamp', 'WC_slab1', 'water_sup'], inplace=True)
+df.sort_values('timestamp', inplace=True)
+
+# === IDENTIFY DRYDOWN EVENTS ===
+df['water_sup_change'] = df['water_sup'].diff().fillna(0)
+df['is_new_watering'] = df['water_sup_change'] > 0
+df['drydown_event_id'] = df['is_new_watering'].cumsum()
+
+# === MODEL FUNCTIONS ===
+def exp_decay(t, a, b, c):
+    return a * np.exp(-b * t) + c
+
+def van_genuchten(h, theta_r, theta_s, alpha, n):
+    m = 1 - 1 / n
+    return theta_r + (theta_s - theta_r) / ((1 + (alpha * h)**n) ** m)
+
+# === FIT MODELS ===
+results = []
+segments_by_id = {}
+
+for event_id, segment in df.groupby('drydown_event_id'):
+    segment = segment[['timestamp', 'WC_slab1']].dropna()
+    if len(segment) < 6:
+        continue
+
+    segment['timestamp'] = pd.to_datetime(segment['timestamp'])
+    segment['time'] = (segment['timestamp'] - segment['timestamp'].min()).dt.total_seconds() / 3600
+    theta_min = segment['WC_slab1'].min()
+    theta_max = segment['WC_slab1'].max()
+    if theta_max == theta_min:
+        continue
+
+    segment['theta'] = (segment['WC_slab1'] - theta_min) / (theta_max - theta_min)
+    segment['h_sim'] = np.exp(segment['time'] / segment['time'].max() * 5)
+
+    try:
+        # Van Genuchten
+        vg_params, _ = curve_fit(van_genuchten, segment['h_sim'], segment['theta'],
+                                 p0=[0.05, 1.0, 0.05, 2.0],
+                                 bounds=([0, 0.8, 0.0001, 1.1], [0.5, 1.2, 1.0, 5.0]),
+                                 maxfev=10000)
+        segment['vg_pred'] = van_genuchten(segment['h_sim'], *vg_params)
+        r2_vg = r2_score(segment['theta'], segment['vg_pred'])
+    except:
+        r2_vg = None
+
+    try:
+        # Exponential Decay
+        exp_params, _ = curve_fit(exp_decay, segment['time'], segment['theta'], p0=[1, 0.1, 0])
+        segment['exp_pred'] = exp_decay(segment['time'], *exp_params)
+        r2_exp = r2_score(segment['theta'], segment['exp_pred'])
+
+        # Hybrid: residual correction
+        segment['residual'] = segment['theta'] - segment['exp_pred']
+        linreg_res = LinearRegression()
+        linreg_res.fit(segment[['time']], segment['residual'])
+        segment['hybrid_pred'] = segment['exp_pred'] + linreg_res.predict(segment[['time']])
+        r2_hybrid = r2_score(segment['theta'], segment['hybrid_pred'])
+    except:
+        r2_exp = None
+        r2_hybrid = None
+
+    try:
+        # Linear Regression
+        linreg = LinearRegression()
+        linreg.fit(segment[['time']], segment['theta'])
+        segment['lin_pred'] = linreg.predict(segment[['time']])
+        r2_lin = r2_score(segment['theta'], segment['lin_pred'])
+    except:
+        r2_lin = None
+
+    segments_by_id[event_id] = segment.copy()
+
+    results.append({
+        'drydown_event_id': event_id,
+        'Van Genuchten R2': r2_vg,
+        'Exponential Decay R2': r2_exp,
+        'Linear Regression R2': r2_lin,
+        'Hybrid Model R2': r2_hybrid
+    })
+
+# === EVALUATE BEST MODEL ===
+comparison_df = pd.DataFrame(results)
+
+def best_model(row):
+    scores = {
+        'Van Genuchten': row['Van Genuchten R2'],
+        'Exponential Decay': row['Exponential Decay R2'],
+        'Linear Regression': row['Linear Regression R2'],
+        'Hybrid Model': row['Hybrid Model R2']
+    }
+    scores = {k: v for k, v in scores.items() if pd.notna(v)}
+    return max(scores, key=scores.get) if scores else None
+
+comparison_df['Best Model'] = comparison_df.apply(best_model, axis=1)
+
+# === SUMMARY CHART ===
+counts = comparison_df['Best Model'].value_counts()
+
+plt.figure(figsize=(8, 5))
+plt.bar(counts.index, counts.values, color='skyblue')
+plt.title("Model Best-Performance Count")
+plt.xlabel("Model")
+plt.ylabel("Number of Events Where Best")
+plt.grid(axis='y')
+plt.tight_layout()
+plt.show()
+
+# === VISUALIZE BEST AND WORST FITS ===
+# Sort by Hybrid R2 (as example metric)
+best_ids = comparison_df.sort_values('Hybrid Model R2', ascending=False).head(3)['drydown_event_id']
+worst_ids = comparison_df.sort_values('Hybrid Model R2', ascending=True).head(3)['drydown_event_id']
+
+fig, axes = plt.subplots(3, 2, figsize=(12, 10))
+
+for i, event_id in enumerate(best_ids):
+    seg = segments_by_id[event_id]
+    ax = axes[i, 0]
+    ax.plot(seg['time'], seg['theta'], 'o', label='Observed')
+    ax.plot(seg['time'], seg['hybrid_pred'], '-', label='Hybrid Fit')
+    ax.set_title(f'Best Fit #{event_id}')
+    ax.legend()
+
+for i, event_id in enumerate(worst_ids):
+    seg = segments_by_id[event_id]
+    ax = axes[i, 1]
+    ax.plot(seg['time'], seg['theta'], 'o', label='Observed')
+    if 'hybrid_pred' in seg:
+        ax.plot(seg['time'], seg['hybrid_pred'], '-', label='Hybrid Fit')
+    ax.set_title(f'Worst Fit #{event_id}')
+    ax.legend()
+
+plt.tight_layout()
+plt.show()
+
+# === PLOT DRYDOWN + WATER SUPPLY FOR TWO RANDOM DAYS ===
+df['date'] = df['timestamp'].dt.date
+sample_dates = df['date'].unique()[:2]
+
+fig, ax1 = plt.subplots(figsize=(12, 5))
+
+for date in sample_dates:
+    subset = df[df['date'] == date]
+    ax1.plot(subset['timestamp'], subset['WC_slab1'], label=f'WC - {date}')
+
+ax2 = ax1.twinx()
+for date in sample_dates:
+    subset = df[df['date'] == date]
+    ax2.plot(subset['timestamp'], subset['water_sup'], '--', label=f'Water Sup - {date}')
+
+ax1.set_ylabel('Water Content (%)')
+ax2.set_ylabel('Water Supplied')
+fig.legend(loc='upper right')
+plt.title("Water Content and Supply for Two Days")
+plt.tight_layout()
+plt.show()
+
+# === HIGHLIGHT SEGMENTS USED FOR MODELING FROM THOSE DAYS ===
+fig, ax = plt.subplots(figsize=(12, 5))
+
+for event_id, segment in segments_by_id.items():
+    if any(segment['timestamp'].dt.date.isin(sample_dates)):
+        ax.plot(segment['timestamp'], segment['WC_slab1'], label=f'Modeled Segment {event_id}')
+
+ax.set_title("Segments Used for Modeling on Sample Days")
+ax.set_ylabel("Water Content (%)")
+ax.set_xlabel("Timestamp")
+ax.legend()
+plt.tight_layout()
+plt.show()
+
+# Optional: Save results
+# comparison_df.to_csv("model_comparison_results.csv", index=False)

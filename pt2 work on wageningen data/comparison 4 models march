@@ -1,0 +1,216 @@
+import pandas as pd
+import numpy as np
+from scipy.optimize import curve_fit
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import r2_score
+import matplotlib.pyplot as plt
+from scipy.integrate import cumulative_trapezoid
+
+# === CONFIGURATION ===
+FILE_PATH = r"Data\Wageningen 2nd greenhouse challenge automatoes data.xlsx"
+SHEET_NAME = "March"
+
+def exp_decay(t, a, b, c):
+    return a * np.exp(-b * t) + c
+
+def van_genuchten(h, theta_r, theta_s, alpha, n):
+    m = 1 - 1 / n
+    return theta_r + (theta_s - theta_r) / ((1 + (alpha * h)**n) ** m)
+
+def safe_standardize(series):
+    std = series.std(ddof=0)
+    if std != 0:
+        return (series - series.mean()) / std
+    else:
+        return series - series.mean()
+
+# === LOAD & CLEAN DATA ===
+df = pd.read_excel(FILE_PATH, sheet_name=SHEET_NAME)
+df = df[['%time', 'WC_slab1', 'water_sup', 'Tot_PAR', 'Tair']].copy()
+df.columns = ['timestamp', 'WC_slab1', 'water_sup', 'Tot_PAR', 'Tair']
+
+df['timestamp'] = pd.to_datetime(df['timestamp'])
+df['WC_slab1'] = df['WC_slab1'].astype(str).str.replace(',', '.')
+df['water_sup'] = df['water_sup'].astype(str).str.replace(',', '.')
+df['Tot_PAR'] = df['Tot_PAR'].astype(str).str.replace(',', '.')
+df['Tair'] = df['Tair'].astype(str).str.replace(',', '.')
+df['WC_slab1'] = pd.to_numeric(df['WC_slab1'], errors='coerce')
+df['water_sup'] = pd.to_numeric(df['water_sup'], errors='coerce')
+df['Tot_PAR'] = pd.to_numeric(df['Tot_PAR'], errors='coerce')
+df['Tair'] = pd.to_numeric(df['Tair'], errors='coerce')
+df.dropna(subset=['timestamp', 'WC_slab1', 'water_sup', 'Tot_PAR', 'Tair'], inplace=True)
+df.sort_values('timestamp', inplace=True)
+
+# === SEGMENT ONLY BIGGEST DRYDOWN EVENT PER DAY, BUT PLOT ONLY LAST 3 DAYS ===
+df['date'] = df['timestamp'].dt.date
+last_3_dates = sorted(df['date'].unique())[-3:]
+
+segments_by_id = {}
+results = []
+event_id = 0
+
+for date, group in df.groupby('date'):
+    group = group.copy()
+    group['water_sup_diff'] = group['water_sup'].diff().fillna(0)
+    group['new_watering'] = group['water_sup_diff'] > 0
+    group['event_id'] = group['new_watering'].cumsum()
+
+    max_drydown = None
+    max_drop = -np.inf
+
+    for eid, segment in group.groupby('event_id'):
+        if len(segment) < 6:
+            continue
+
+        start_wc = segment['WC_slab1'].iloc[0]
+        end_wc = segment['WC_slab1'].iloc[-1]
+        drop = start_wc - end_wc
+
+        if drop > max_drop:
+            max_drop = drop
+            max_drydown = segment.copy()
+
+    if max_drydown is None or len(max_drydown) < 6:
+        continue
+
+    segment = max_drydown
+    segment['timestamp'] = pd.to_datetime(segment['timestamp'])
+    segment['time'] = (segment['timestamp'] - segment['timestamp'].min()).dt.total_seconds() / 3600
+    theta_min = segment['WC_slab1'].min()
+    theta_max = segment['WC_slab1'].max()
+    if theta_max == theta_min:
+        continue
+
+    segment['theta'] = (segment['WC_slab1'] - theta_min) / (theta_max - theta_min)
+    segment['h_sim'] = np.exp(segment['time'] / segment['time'].max() * 5)
+
+    try:
+        vg_params, _ = curve_fit(van_genuchten, segment['h_sim'], segment['theta'],
+                                 p0=[0.05, 1.0, 0.05, 2.0],
+                                 bounds=([0, 0.8, 0.0001, 1.1], [0.5, 1.2, 1.0, 5.0]),
+                                 maxfev=10000)
+        segment['vg_pred'] = van_genuchten(segment['h_sim'], *vg_params)
+        r2_vg = r2_score(segment['theta'], segment['vg_pred'])
+
+        segment['residual_vg'] = segment['theta'] - segment['vg_pred']
+        linreg_grey = LinearRegression()
+        linreg_grey.fit(segment[['time']], segment['residual_vg'])
+        segment['greybox_pred'] = segment['vg_pred'] + linreg_grey.predict(segment[['time']])
+        r2_grey = r2_score(segment['theta'], segment['greybox_pred'])
+    except:
+        r2_vg = None
+        r2_grey = None
+
+    try:
+        exp_params, _ = curve_fit(exp_decay, segment['time'], segment['theta'], p0=[1, 0.1, 0])
+        segment['exp_pred'] = exp_decay(segment['time'], *exp_params)
+        r2_exp = r2_score(segment['theta'], segment['exp_pred'])
+
+        segment['residual_exp'] = segment['theta'] - segment['exp_pred']
+        linreg_res = LinearRegression()
+        linreg_res.fit(segment[['time']], segment['residual_exp'])
+        segment['hybrid_pred'] = segment['exp_pred'] + linreg_res.predict(segment[['time']])
+        r2_hybrid = r2_score(segment['theta'], segment['hybrid_pred'])
+    except:
+        r2_exp = None
+        r2_hybrid = None
+
+    try:
+        linreg = LinearRegression()
+        linreg.fit(segment[['time']], segment['theta'])
+        segment['lin_pred'] = linreg.predict(segment[['time']])
+        r2_lin = r2_score(segment['theta'], segment['lin_pred'])
+    except:
+        r2_lin = None
+
+    try:
+        segment['Tot_PAR'] = safe_standardize(segment['Tot_PAR'])
+        segment['Tair'] = safe_standardize(segment['Tair'])
+
+        t = segment['time'].values
+        par = segment['Tot_PAR'].values
+        tair = segment['Tair'].values
+        theta = segment['theta'].values
+
+        def et_rate(t, k1, k2, k3):
+            return k1 * par + k2 * tair + k3
+
+        def theta_phys_model(t, k1, k2, k3):
+            et = et_rate(t, k1, k2, k3)
+            cum_et = cumulative_trapezoid(et, t, initial=0)
+            return theta[0] - cum_et
+
+        phys_params, _ = curve_fit(theta_phys_model, t, theta, p0=[0.01, 0.01, 0.01])
+        segment['water_balance_pred'] = theta_phys_model(t, *phys_params)
+        r2_wb = r2_score(theta, segment['water_balance_pred'])
+    except Exception as e:
+        print(f"Water balance model failed on {date} with error: {e}")
+        r2_wb = None
+
+    segments_by_id[event_id] = segment.copy()
+    results.append({
+        'drydown_event_id': event_id,
+        'Van Genuchten R2': r2_vg,
+        'Exponential Decay R2': r2_exp,
+        'Linear Regression R2': r2_lin,
+        'Hybrid Model R2': r2_hybrid,
+        'Grey-box Model R2': r2_grey,
+        'Water Balance R2': r2_wb,
+        'date': date
+    })
+    event_id += 1
+
+# === CREATE COMPARISON PLOTS ONLY FOR LAST 3 DAYS ===
+segments_to_plot = [i for i, r in enumerate(results) if r['date'] in last_3_dates]
+fig, axes = plt.subplots(len(segments_to_plot), 1, figsize=(10, 4 * len(segments_to_plot)))
+
+if len(segments_by_id) == 1:
+    axes = [axes]
+
+for ax, event_id in zip(axes, segments_to_plot):
+    segment = segments_by_id[event_id]
+    ax.plot(segment['time'], segment['theta'], 'o', label='Observed')
+    if 'lin_pred' in segment:
+        ax.plot(segment['time'], segment['lin_pred'], '--', label='Linear')
+    if 'exp_pred' in segment:
+        ax.plot(segment['time'], segment['exp_pred'], ':', label='Exponential')
+    if 'vg_pred' in segment:
+        ax.plot(segment['time'], segment['vg_pred'], '-.', label='Van Genuchten')
+    if 'hybrid_pred' in segment:
+        ax.plot(segment['time'], segment['hybrid_pred'], label='Hybrid')
+    if 'greybox_pred' in segment:
+        ax.plot(segment['time'], segment['greybox_pred'], label='Grey-box')
+    if 'water_balance_pred' in segment:
+        ax.plot(segment['time'], segment['water_balance_pred'], label='Water Balance')
+    ax.set_title(f'Drydown Event {event_id} ({segment["timestamp"].dt.date.iloc[0]})')
+    ax.set_xlabel('Time (h)')
+    ax.set_ylabel('Normalized WC')
+    ax.legend()
+    ax.grid(True)
+
+plt.tight_layout()
+plt.show()
+
+# === CREATE SUMMARY TABLE ===
+comparison_df = pd.DataFrame(results)
+
+# Determine best model per event by highest R2
+model_cols = [
+    'Van Genuchten R2',
+    'Exponential Decay R2',
+    'Linear Regression R2',
+    'Hybrid Model R2',
+    'Grey-box Model R2',
+    'Water Balance R2'
+]
+
+comparison_df['Best Model'] = comparison_df[model_cols].idxmax(axis=1)
+
+# Count how often each model was best
+best_model_counts = comparison_df['Best Model'].value_counts()
+
+print("Model Comparison Summary:")
+print(comparison_df.sort_values('drydown_event_id').to_string(index=False))
+
+print("Best Model Frequency Summary:")
+print(best_model_counts.to_string())
