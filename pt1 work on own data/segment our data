@@ -1,0 +1,83 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+from scipy.signal import find_peaks
+
+# === Load data ===
+df = pd.read_excel("Data/Master Data - met sensoren_nieuwe code.xlsx")
+df['Timestamp'] = pd.to_datetime(df['Timestamp'])
+
+# === Moisture calculation ===
+dry_weights = {
+    'LoadCell_1': 75, 'LoadCell_2': 60, 'LoadCell_3': 85, 'LoadCell_4': 80,
+    'LoadCell_5': 85, 'LoadCell_6': 75, 'LoadCell_7': 85, 'LoadCell_8': 80
+}
+max_water_contents = {key: 585 for key in dry_weights}
+valid_range = (400, 800)
+
+# Filter and compute moisture
+loadcell_cols = [f'LoadCell_{i}' for i in range(1, 9)]
+for col in loadcell_cols:
+    df = df[(df[col] >= valid_range[0]) & (df[col] <= valid_range[1])]
+
+for lc in dry_weights:
+    df[f'{lc}_moisture'] = (df[lc] - dry_weights[lc]) / max_water_contents[lc]
+
+# === Segment drydowns based on drops ===
+def segment_moisture_series(timestamps, series, min_segment_size=6, drop_threshold=0.002):
+    segments = []
+    delta = series.diff().fillna(0)
+    watering_indices = delta[delta > drop_threshold].index.to_list()
+    watering_indices = [-1] + watering_indices + [len(series)]
+
+    for i in range(len(watering_indices) - 1):
+        start = watering_indices[i] + 1
+        end = watering_indices[i + 1]
+
+        if end - start < min_segment_size:
+            continue
+
+        seg_series = series.iloc[start:end].copy()
+        seg_time = timestamps.iloc[start:end].copy()
+        t = (seg_time - seg_time.iloc[0]).dt.total_seconds() / 3600
+        theta_min = seg_series.min()
+        theta_max = seg_series.max()
+        if theta_max == theta_min:
+            continue
+
+        segment = pd.DataFrame({
+            'Timestamp': seg_time,
+            'time': t,
+            'theta': (seg_series - theta_min) / (theta_max - theta_min),
+        })
+        segments.append(segment)
+
+    return segments
+
+# === Collect and plot segments ===
+all_segments = {}
+for lc in dry_weights:
+    col_moisture = f'{lc}_moisture'
+    segments = segment_moisture_series(df['Timestamp'], df[col_moisture])
+    all_segments[lc] = segments
+
+    # Plot
+    fig, axes = plt.subplots(len(segments), 1, figsize=(10, 3 * len(segments)))
+    if len(segments) == 1:
+        axes = [axes]
+    for ax, seg in zip(axes, segments):
+        ax.plot(seg['time'], seg['theta'], 'o-', label='Normalized WC')
+        ax.set_title(f'{lc} Segment starting {seg["Timestamp"].iloc[0]}')
+        ax.set_xlabel("Time [h]")
+        ax.set_ylabel("θ (Normalized Moisture)")
+        ax.grid(True)
+        ax.legend()
+    plt.tight_layout()
+    plt.show()
+
+# === Summary ===
+summary = {lc: len(segments) for lc, segments in all_segments.items()}
+print("Segment counts per LoadCell:")
+for lc, count in summary.items():
+    print(f"{lc}: {count} segments")

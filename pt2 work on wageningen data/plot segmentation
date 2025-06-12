@@ -1,0 +1,53 @@
+import pandas as pd
+import matplotlib.pyplot as plt
+
+# === CONFIGURATION ===
+file_path = r"Data\Wageningen 2nd greenhouse challenge automatoes data.xlsx"
+sheet_name = "March"
+
+# === LOAD & CLEAN DATA ===
+df = pd.read_excel(file_path, sheet_name=sheet_name)
+df = df[['%time', 'WC_slab1', 'water_sup', 'Tot_PAR', 'Tair']].copy()
+df.columns = ['timestamp', 'WC_slab1', 'water_sup', 'Tot_PAR', 'Tair']
+
+# Convert values
+for col in ['WC_slab1', 'water_sup', 'Tot_PAR', 'Tair']:
+    df[col] = pd.to_numeric(df[col].astype(str).str.replace(',', '.'), errors='coerce')
+
+df.dropna(inplace=True)
+df['timestamp'] = pd.to_datetime(df['timestamp'])
+df.sort_values('timestamp', inplace=True)
+df['date'] = df['timestamp'].dt.date
+
+# === CHOOSE A TEST DAY (last 20%) ===
+unique_dates = sorted(df['date'].unique())
+test_dates = unique_dates[int(len(unique_dates) * 0.8):]
+sample_date = test_dates[0]  # Pick the first test date
+
+# === SEGMENT WATERING EVENTS ===
+group = df[df['date'] == sample_date].copy()
+group['water_sup_diff'] = group['water_sup'].diff().fillna(0)
+group['new_watering'] = group['water_sup_diff'] > 0
+group['event_id'] = group['new_watering'].cumsum()
+
+# === PLOT ===
+fig, ax1 = plt.subplots(figsize=(12, 5))
+colors = plt.cm.tab10.colors
+
+# Plot WC_slab1 for each segment
+for eid, segment in group.groupby('event_id'):
+    ax1.plot(segment['timestamp'], segment['WC_slab1'], 'o-', label=f'Segment {eid}', color=colors[eid % len(colors)])
+
+ax1.set_title(f"Drydown Segments on {sample_date}")
+ax1.set_ylabel("Water Content (WC_slab1)")
+ax1.set_xlabel("Time")
+#ax1.legend()
+ax1.grid(True)
+
+# Plot water supply on secondary axis
+ax2 = ax1.twinx()
+ax2.plot(group['timestamp'], group['water_sup'], '--', label='Water Supplied', color='gray', alpha=0.6)
+ax2.set_ylabel("Cumulative Water Supplied")
+
+plt.tight_layout()
+plt.show()

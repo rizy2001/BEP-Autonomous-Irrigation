@@ -1,0 +1,119 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+from scipy.optimize import curve_fit
+from scipy.integrate import cumulative_trapezoid
+from sklearn.metrics import r2_score
+
+# === Model Definitions ===
+def exp_decay(t, a, b, c):
+    return a * np.exp(-b * t) + c
+
+def van_genuchten(h, theta_r, theta_s, alpha, n):
+    m = 1 - 1 / n
+    return theta_r + (theta_s - theta_r) / ((1 + (alpha * h)**n) ** m)
+
+def safe_standardize(series):
+    std = series.std(ddof=0)
+    return (series - series.mean()) / std if std != 0 else series - series.mean()
+
+# === Load Model Parameters ===
+params = np.load("trained_models/curve_fit_params.npz")
+coeffs = np.load("trained_models/model_coeffs.npz")
+
+phys_params = params['phys_params']
+vg_params = params['vg_params']
+exp_params = params['exp_params']
+
+linreg_coef = coeffs['linreg_coef'].item()
+linreg_intercept = coeffs['linreg_intercept'].item()
+greybox_coef = coeffs['greybox_coef'].item()
+greybox_intercept = coeffs['greybox_intercept'].item()
+
+# === Load and Prepare Data ===
+df = pd.read_excel('Data/Run_10-6.xlsx')
+df['Timestamp'] = pd.to_datetime(df['Timestamp'])
+df = df[['Timestamp', 'LoadCell_7', 'Tot_Par', 'Tair']].copy()
+
+dry_weight = 85
+max_water_content = 585
+df = df[(df['LoadCell_7'] >= 400) & (df['LoadCell_7'] <= 800)]
+df['LoadCell_7_water'] = (df['LoadCell_7'] - dry_weight) / max_water_content * 100
+df['Water_Diff'] = df['LoadCell_7_water'].diff()
+
+segment_start = pd.to_datetime('2025-06-10 10:45:36.958432')
+segment_end = df['Timestamp'].iloc[-1]
+df_segment = df[(df['Timestamp'] >= segment_start) & (df['Timestamp'] <= segment_end)].copy()
+
+# === Preprocessing for Models ===
+df_segment['time'] = (df_segment['Timestamp'] - df_segment['Timestamp'].min()).dt.total_seconds() / 3600
+theta_min = df_segment['LoadCell_7_water'].min()
+theta_max = df_segment['LoadCell_7_water'].max()
+df_segment['theta'] = (df_segment['LoadCell_7_water'] - theta_min) / (theta_max - theta_min)
+df_segment['h_sim'] = np.exp(df_segment['time'] / df_segment['time'].max() * 5)
+df_segment['Tot_Par'] = safe_standardize(df_segment['Tot_Par'])
+df_segment['Tair'] = safe_standardize(df_segment['Tair'])
+
+# === Apply Models ===
+# Water Balance
+k1, k2, k3 = phys_params
+et = k1 * df_segment['Tot_Par'].values + k2 * df_segment['Tair'].values + k3
+cum_et = cumulative_trapezoid(et, df_segment['time'], initial=0)
+df_segment['water_balance_pred'] = df_segment['theta'].iloc[0] - cum_et
+
+# Van Genuchten
+df_segment['vg_pred'] = van_genuchten(df_segment['h_sim'], *vg_params)
+
+# Grey-box
+residual = greybox_coef * df_segment['time'] + greybox_intercept
+df_segment['greybox_pred'] = df_segment['vg_pred'] + residual
+
+# Exponential Decay
+df_segment['exp_pred'] = exp_decay(df_segment['time'], *exp_params)
+
+# Linear Regression
+df_segment['lin_pred'] = linreg_coef * df_segment['time'] + linreg_intercept
+
+# === Plot Water Content ===
+plt.figure(figsize=(12, 6))
+plt.plot(df_segment['Timestamp'], df_segment['LoadCell_7_water'], label='Water Content')
+plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%H:%M\n%d-%b'))
+plt.gcf().autofmt_xdate()
+plt.xlabel('Time')
+plt.ylabel('Water Content [%]')
+plt.title('Water Content of LoadCell_7 Over Drydown Segment')
+plt.grid(True)
+plt.legend()
+plt.tight_layout()
+plt.show()
+
+# === Plot Normalized Model Fits ===
+plt.figure(figsize=(12, 6))
+plt.plot(df_segment['time'], df_segment['theta'], 'o', label='Observed', markersize=5)
+plt.plot(df_segment['time'], df_segment['water_balance_pred'], label='Water Balance')
+plt.plot(df_segment['time'], df_segment['vg_pred'], label='Van Genuchten')
+plt.plot(df_segment['time'], df_segment['greybox_pred'], label='Grey-box')
+plt.plot(df_segment['time'], df_segment['exp_pred'], label='Exponential Decay')
+plt.plot(df_segment['time'], df_segment['lin_pred'], label='Linear Regression')
+
+plt.xlabel('Time (h)')
+plt.ylabel('Normalized Water Content')
+plt.title('Model Predictions on LoadCell_7 Drydown Segment')
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+
+# === Calculate R² Scores ===
+r2_scores = {
+    'Water Balance': r2_score(df_segment['theta'], df_segment['water_balance_pred']),
+    'Van Genuchten': r2_score(df_segment['theta'], df_segment['vg_pred']),
+    'Grey-box': r2_score(df_segment['theta'], df_segment['greybox_pred']),
+    'Exponential Decay': r2_score(df_segment['theta'], df_segment['exp_pred']),
+    'Linear Regression': r2_score(df_segment['theta'], df_segment['lin_pred']),
+}
+
+print("R² Scores:")
+for model, score in r2_scores.items():
+    print(f"{model}: {score:.4f}")

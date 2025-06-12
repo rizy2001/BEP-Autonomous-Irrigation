@@ -4,7 +4,7 @@ import matplotlib.dates as mdates
 plt.rcParams.update({'font.size': 14})
 
 # Load your Excel or CSV file
-df = pd.read_excel('Master Data - met sensoren_nieuwe code.xlsx')
+df = pd.read_excel('Data\Run_10-6.xlsx')
 
 # Convert timestamp to datetime
 df['Timestamp'] = pd.to_datetime(df['Timestamp'])

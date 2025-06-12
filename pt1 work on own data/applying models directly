@@ -1,0 +1,115 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+from scipy.optimize import curve_fit
+from scipy.integrate import cumulative_trapezoid
+
+# === Load trained model parameters ===
+params = np.load("trained_models/curve_fit_params.npz", allow_pickle=True)
+phys_params = params["phys_params"]
+vg_params = params["vg_params"]
+exp_params = params["exp_params"]
+
+# Load linear and grey-box coefficients
+model_coeffs = np.load("trained_models/model_coeffs.npz", allow_pickle=True)
+linreg_coef = model_coeffs["linreg_coef"].item() if model_coeffs["linreg_coef"].shape == () else model_coeffs["linreg_coef"]
+linreg_intercept = model_coeffs["linreg_intercept"].item()
+greybox_coef = model_coeffs["greybox_coef"].item() if model_coeffs["greybox_coef"].shape == () else model_coeffs["greybox_coef"]
+greybox_intercept = model_coeffs["greybox_intercept"].item()
+
+# === Define models ===
+def exp_decay(t, a, b, c):
+    return a * np.exp(-b * t) + c
+
+def van_genuchten(h, theta_r, theta_s, alpha, n):
+    m = 1 - 1 / n
+    return theta_r + (theta_s - theta_r) / ((1 + (alpha * h)**n) ** m)
+
+def safe_standardize(series):
+    std = series.std(ddof=0)
+    return (series - series.mean()) / std if std != 0 else series - series.mean()
+
+# === Load and clean new dataset ===
+df = pd.read_excel("Data/Master Data - met sensoren_nieuwe code.xlsx")
+df['Timestamp'] = pd.to_datetime(df['Timestamp'])
+
+# Ensure sensor range is valid
+dry_weights = {
+    'LoadCell_1': 75, 'LoadCell_2': 60, 'LoadCell_3': 85, 'LoadCell_4': 80,
+    'LoadCell_5': 85, 'LoadCell_6': 75, 'LoadCell_7': 85, 'LoadCell_8': 80
+}
+max_water_contents = {key: 585 for key in dry_weights}
+valid_range = (400, 800)
+
+loadcell_cols = [f'LoadCell_{i}' for i in range(1, 9)]
+for col in loadcell_cols:
+    df = df[(df[col] >= valid_range[0]) & (df[col] <= valid_range[1])]
+
+# Compute moisture content
+for lc in dry_weights:
+    df[f'{lc}_moisture'] = (df[lc] - dry_weights[lc]) / max_water_contents[lc]
+
+# === Apply models ===
+def apply_models(df, col_moisture, par, tair, timestamp):
+    t = (timestamp - timestamp.min()).dt.total_seconds() / 3600
+    theta = (df[col_moisture] - df[col_moisture].min()) / (df[col_moisture].max() - df[col_moisture].min())
+    h_sim = np.exp(t / t.max() * 5)
+    par_std = safe_standardize(par)
+    tair_std = safe_standardize(tair)
+
+    results = {'time': t, 'theta': theta}
+
+    try:
+        et = phys_params[0] * par_std + phys_params[1] * tair_std + phys_params[2]
+        cum_et = cumulative_trapezoid(et, t, initial=0)
+        results['water_balance'] = theta.iloc[0] - cum_et
+    except:
+        results['water_balance'] = None
+
+    try:
+        vg = van_genuchten(h_sim, *vg_params)
+        results['vg'] = vg
+        results['greybox'] = vg + (greybox_coef * t + greybox_intercept)
+    except:
+        results['vg'] = None
+        results['greybox'] = None
+
+    try:
+        results['exp'] = exp_decay(t, *exp_params)
+    except:
+        results['exp'] = None
+
+    try:
+        results['lin'] = linreg_coef * t + linreg_intercept
+    except:
+        results['lin'] = None
+
+    return results
+
+# === Plot results for each load cell ===
+for lc in dry_weights:
+    col_moisture = f'{lc}_moisture'
+    output = apply_models(df, col_moisture, df['Tot_PAR'], df['Tair'], df['Timestamp'])
+
+    plt.figure(figsize=(12, 6))
+    plt.plot(df['Timestamp'], output['theta'], 'o', label='Observed', alpha=0.6)
+
+    for key, label in [
+        ('water_balance', 'Water Balance'),
+        ('vg', 'Van Genuchten'),
+        ('greybox', 'Grey-box'),
+        ('exp', 'Exponential Decay'),
+        ('lin', 'Linear Regression')
+    ]:
+        if output.get(key) is not None:
+            plt.plot(df['Timestamp'], output[key], label=label)
+
+    plt.title(f"Model Predictions on {lc}")
+    plt.xlabel("Timestamp")
+    plt.ylabel("Normalized θ (Moisture)")
+    plt.legend()
+    plt.grid(True)
+    plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%H:%M\n%d-%b'))
+    plt.tight_layout()
+    plt.show()
