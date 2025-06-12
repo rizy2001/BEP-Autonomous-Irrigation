@@ -36,12 +36,14 @@ df_segment = df[(df['Timestamp'] >= segment_start) & (df['Timestamp'] <= segment
 
 # === Preprocessing for Models ===
 df_segment['time'] = (df_segment['Timestamp'] - df_segment['Timestamp'].min()).dt.total_seconds() / 3600
-theta_min = df_segment['LoadCell_7_water'].min()
-theta_max = df_segment['LoadCell_7_water'].max()
-df_segment['theta'] = (df_segment['LoadCell_7_water'] - theta_min) / (theta_max - theta_min)
+df_segment['theta'] = df_segment['LoadCell_7_water']
+theta_min = df_segment['theta'].min()
+theta_max = df_segment['theta'].max()
+theta_norm = (df_segment['theta'] - theta_min) / (theta_max - theta_min)
+
 df_segment['h_sim'] = np.exp(df_segment['time'] / df_segment['time'].max() * 5)
-df_segment['Tot_Par'] = safe_standardize(df_segment['Tot_Par'])
-df_segment['Tair'] = safe_standardize(df_segment['Tair'])
+df_segment['Tot_Par'] = df_segment['Tot_Par']
+df_segment['Tair'] = df_segment['Tair']
 
 # === Fit Models ===
 # Water Balance
@@ -60,11 +62,16 @@ except:
 
 # Van Genuchten
 try:
-    vg_params, _ = curve_fit(van_genuchten, df_segment['h_sim'], df_segment['theta'],
-                             p0=[0.05, 1.0, 0.05, 2.0],
-                             bounds=([0, 0.8, 0.0001, 1.1], [0.5, 1.2, 1.0, 5.0]),
-                             maxfev=10000)
-    df_segment['vg_pred'] = van_genuchten(df_segment['h_sim'], *vg_params)
+    vg_params, _ = curve_fit(
+        van_genuchten,
+        df_segment['h_sim'],
+        theta_norm,
+        p0=[0.05, 1.0, 0.05, 2.0],
+        bounds=([0, 0.8, 0.0001, 1.1], [0.5, 1.2, 1.0, 5.0]),
+        maxfev=10000
+    )
+    vg_pred_norm = van_genuchten(df_segment['h_sim'], *vg_params)
+    df_segment['vg_pred'] = vg_pred_norm * (theta_max - theta_min) + theta_min  # denormalize
 except:
     df_segment['vg_pred'] = np.nan
 
@@ -91,21 +98,6 @@ try:
     df_segment['lin_pred'] = lin_model.predict(df_segment[['time']])
 except:
     df_segment['lin_pred'] = np.nan
-'''
-# === Plot Water Content ===
-plt.figure(figsize=(12, 6))
-plt.plot(df_segment['Timestamp'], df_segment['LoadCell_7_water'], label='Water Content')
-plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%H:%M\n%d-%b'))
-plt.gcf().autofmt_xdate()
-plt.xlabel('Time')
-plt.ylabel('Water Content [%]')
-plt.title('Water Content of LoadCell_7 Over Drydown Segment')
-plt.grid(True)
-plt.legend()
-plt.tight_layout()
-plt.show() 
-
-'''
 
 # === Plot Model Fits Against Real Timestamps ===
 plt.figure(figsize=(12, 6))
@@ -120,12 +112,10 @@ for col, label in [
     if col in df_segment:
         plt.plot(df_segment['Timestamp'], df_segment[col], label=label)
 
-# Format time axis
 plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%H:%M\n%d-%b'))
 plt.gcf().autofmt_xdate()
-
 plt.xlabel('Timestamp')
-plt.ylabel('Normalized Water Content')
+plt.ylabel('Water Content [%]')
 plt.title('Model Fits on LoadCell_7 (Timestamp-Aligned)')
 plt.legend()
 plt.grid(True)

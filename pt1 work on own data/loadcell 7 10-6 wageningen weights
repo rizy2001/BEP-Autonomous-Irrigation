@@ -48,9 +48,11 @@ df_segment = df[(df['Timestamp'] >= segment_start) & (df['Timestamp'] <= segment
 
 # === Preprocessing for Models ===
 df_segment['time'] = (df_segment['Timestamp'] - df_segment['Timestamp'].min()).dt.total_seconds() / 3600
-theta_min = df_segment['LoadCell_7_water'].min()
-theta_max = df_segment['LoadCell_7_water'].max()
-df_segment['theta'] = (df_segment['LoadCell_7_water'] - theta_min) / (theta_max - theta_min)
+df_segment['theta'] = df_segment['LoadCell_7_water']  # use original water content for final output
+theta_min = df_segment['theta'].min()
+theta_max = df_segment['theta'].max()
+theta_norm = (df_segment['theta'] - theta_min) / (theta_max - theta_min)  # used only for VG
+
 df_segment['h_sim'] = np.exp(df_segment['time'] / df_segment['time'].max() * 5)
 df_segment['Tot_Par'] = safe_standardize(df_segment['Tot_Par'])
 df_segment['Tair'] = safe_standardize(df_segment['Tair'])
@@ -62,8 +64,9 @@ et = k1 * df_segment['Tot_Par'].values + k2 * df_segment['Tair'].values + k3
 cum_et = cumulative_trapezoid(et, df_segment['time'], initial=0)
 df_segment['water_balance_pred'] = df_segment['theta'].iloc[0] - cum_et
 
-# Van Genuchten
-df_segment['vg_pred'] = van_genuchten(df_segment['h_sim'], *vg_params)
+# Van Genuchten — predict in normalized space, then denormalize
+vg_pred_norm = van_genuchten(df_segment['h_sim'], *vg_params)
+df_segment['vg_pred'] = vg_pred_norm * (theta_max - theta_min) + theta_min
 
 # Grey-box
 residual = greybox_coef * df_segment['time'] + greybox_intercept
@@ -77,7 +80,7 @@ df_segment['lin_pred'] = linreg_coef * df_segment['time'] + linreg_intercept
 
 # === Plot Water Content ===
 plt.figure(figsize=(12, 6))
-plt.plot(df_segment['Timestamp'], df_segment['LoadCell_7_water'], label='Water Content')
+plt.plot(df_segment['Timestamp'], df_segment['theta'], label='Water Content')
 plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%H:%M\n%d-%b'))
 plt.gcf().autofmt_xdate()
 plt.xlabel('Time')
@@ -88,17 +91,17 @@ plt.legend()
 plt.tight_layout()
 plt.show()
 
-# === Plot Normalized Model Fits ===
+# === Plot Model Fits in Actual Units ===
 plt.figure(figsize=(12, 6))
 plt.plot(df_segment['time'], df_segment['theta'], 'o', label='Observed', markersize=5)
 plt.plot(df_segment['time'], df_segment['water_balance_pred'], label='Water Balance')
 plt.plot(df_segment['time'], df_segment['vg_pred'], label='Van Genuchten')
 plt.plot(df_segment['time'], df_segment['greybox_pred'], label='Grey-box')
-plt.plot(df_segment['time'], df_segment['exp_pred'], label='Exponential Decay')
-plt.plot(df_segment['time'], df_segment['lin_pred'], label='Linear Regression')
+#plt.plot(df_segment['time'], df_segment['exp_pred'], label='Exponential Decay')
+#plt.plot(df_segment['time'], df_segment['lin_pred'], label='Linear Regression')
 
 plt.xlabel('Time (h)')
-plt.ylabel('Normalized Water Content')
+plt.ylabel('Water Content [%]')
 plt.title('Model Predictions on LoadCell_7 Drydown Segment')
 plt.legend()
 plt.grid(True)

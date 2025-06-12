@@ -391,3 +391,12 @@ np.savez(os.path.join(export_path, "model_coeffsv5.npz"),
 
 
 print("✅ Models and parameters saved.")
+
+if vg_params is not None:
+    theta_r, theta_s, alpha, n = vg_params
+    print(f"theta_r: {theta_r:.4f}")
+    print(f"theta_s: {theta_s:.4f}")
+    print(f"alpha: {alpha:.4f}")
+    print(f"n: {n:.4f}")
+else:
+    print("Van Genuchten fitting failed.")
