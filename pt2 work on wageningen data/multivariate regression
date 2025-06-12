@@ -1,0 +1,270 @@
+import pandas as pd
+import numpy as np
+import statsmodels.api as sm
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+from sklearn.preprocessing import StandardScaler
+
+# === CONFIG ===
+FILE_PATH = "Data/Wageningen 2nd greenhouse challenge automatoes data.xlsx"
+SHEET_NAME = "March Expanded Filtered"
+
+# === LOAD AND CLEAN DATA ===
+df = pd.read_excel(FILE_PATH, sheet_name=SHEET_NAME)
+df.columns = [col.strip().replace('%', 'percent').replace(' ', '_') for col in df.columns]
+
+# Convert comma-based decimals and enforce numeric types
+for col in df.columns:
+    df[col] = df[col].astype(str).str.replace(',', '.', regex=False)
+    try:
+        df[col] = pd.to_numeric(df[col])
+    except:
+        pass  # leave non-numeric columns like timestamps
+
+# Ensure timestamp is parsed
+if 'percenttime' in df.columns:
+    df['timestamp'] = pd.to_datetime(df['percenttime'], errors='coerce')
+elif 'timestamp' not in df.columns:
+    raise ValueError("No valid timestamp column found.")
+
+df = df.dropna(subset=['timestamp', 'WC_slab1'])
+df = df.sort_values('timestamp')
+df['time'] = (df['timestamp'] - df['timestamp'].min()).dt.total_seconds() / 3600
+df['date'] = df['timestamp'].dt.date
+
+# === SEGMENT DRYDOWN EVENTS ===
+def safe_standardize(series):
+    std = series.std(ddof=0)
+    return (series - series.mean()) / std if std != 0 else series - series.mean()
+
+for col in ['WC_slab1', 'water_sup', 'Tot_PAR', 'Tair']:
+    df[col] = pd.to_numeric(df[col], errors='coerce')
+
+df['water_sup_diff'] = df['water_sup'].diff().fillna(0)
+unique_dates = sorted(df['date'].unique())
+split_index = int(len(unique_dates) * 0.8)
+train_dates = unique_dates[:split_index]
+train_segments = []
+
+for i in range(len(unique_dates) - 1):
+    day1, day2 = unique_dates[i], unique_dates[i + 1]
+    df_day1 = df[df['date'] == day1]
+    df_day2 = df[df['date'] == day2]
+    if df_day1.empty or df_day2.empty:
+        continue
+
+    last_water = df_day1[df_day1['water_sup_diff'] > 0]['timestamp'].max()
+    first_water = df_day2[df_day2['water_sup_diff'] > 0]['timestamp'].min()
+    if pd.isna(last_water) or pd.isna(first_water):
+        continue
+
+    mask = (df['timestamp'] > last_water) & (df['timestamp'] < first_water)
+    segment = df[mask].copy()
+    if segment.empty or len(segment) < 6:
+        continue
+
+    segment['time'] = (segment['timestamp'] - segment['timestamp'].min()).dt.total_seconds() / 3600
+    tmin = segment['WC_slab1'].min()
+    tmax = segment['WC_slab1'].max()
+    if tmax == tmin:
+        continue
+
+    segment['theta'] = (segment['WC_slab1'] - tmin) / (tmax - tmin)
+    # Standardize all numeric features in the segment (except timestamp, time, WC_slab1, theta)
+    exclude_cols = {'timestamp', 'time', 'WC_slab1', 'theta'}
+    numeric_cols = segment.select_dtypes(include='number').columns
+    features_to_standardize = [col for col in numeric_cols if col not in exclude_cols]
+
+    for col in features_to_standardize:
+        std = segment[col].std(ddof=0)
+        mean = segment[col].mean()
+        if std != 0:
+            segment[col] = (segment[col] - mean) / std
+        else:
+            segment[col] = segment[col] - mean
+
+
+    if day1 in train_dates and day2 in train_dates:
+        train_segments.append(segment)
+
+# === COMBINE SEGMENTS AND SELECT FEATURES ===
+df_seg = pd.concat(train_segments, ignore_index=True)
+
+exclude = {'WC_slab1', 'theta', 'time', 'timestamp', 'percenttime'}
+# Coerce all potential features to numeric
+for col in df_seg.columns:
+    if col not in exclude:
+        df_seg[col] = df_seg[col].astype(str).str.replace(',', '.', regex=False)
+        df_seg[col] = pd.to_numeric(df_seg[col], errors='coerce')
+
+# Final usable numeric features
+numeric_cols = df_seg.select_dtypes(include=[np.number]).columns
+features = [col for col in numeric_cols if col not in exclude]
+features = [col for col in features if df_seg[col].nunique() > 1]  # remove constant cols
+
+# Remove perfectly collinear features
+X = df_seg[features].copy()
+corr_matrix = X.corr().abs()
+upper_tri = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
+to_drop = [col for col in upper_tri.columns if any(upper_tri[col] == 1.0)]
+X = X.drop(columns=to_drop, errors='ignore')
+
+# Final prep
+X = X.fillna(X.mean())
+X = sm.add_constant(X)
+y = df_seg['theta'].fillna(df_seg['theta'].mean())
+
+print("✅ Final feature count:", X.shape[1])
+print("Dropped perfectly collinear columns:", to_drop)
+
+print("📋 Features in original data:", sorted(df.columns))
+print("🧮 Numeric features used:", sorted(features))
+print("❌ Dropped for collinearity:", to_drop)
+print("🚫 Zero variance:", [col for col in features if df_seg[col].nunique() == 1])
+
+# === TRAIN MODEL ===
+model = sm.OLS(y, X).fit()
+print(model.summary())
+
+# === VISUALIZE COEFFICIENTS ===
+coefs = model.params.drop("const")
+errors = model.bse.drop("const")
+pvals = model.pvalues.drop("const")
+
+plt.figure(figsize=(12, len(coefs) * 0.3))
+bars = plt.barh(coefs.index, coefs.values, xerr=errors, color='skyblue', edgecolor='black')
+for bar, pval in zip(bars, pvals):
+    if pval < 0.05:
+        bar.set_color('green')
+    elif pval < 0.1:
+        bar.set_color('orange')
+    else:
+        bar.set_color('red')
+
+plt.axvline(0, color='black', linewidth=0.8)
+plt.xlabel("Coefficient Value")
+plt.title("Multivariate Regression Coefficients\nGreen = p<0.05, Orange = p<0.1, Red = Not Significant")
+plt.grid(True, axis='x')
+plt.tight_layout()
+plt.show()
+
+# === VISUALIZE FIRST 3 SEGMENTS ===
+fig, axes = plt.subplots(nrows=3, figsize=(12, 12), sharex=False)
+for i, segment in enumerate(train_segments[:3]):
+    seg = segment.copy()
+    X_seg = seg[features].copy()
+    X_seg = X_seg.drop(columns=to_drop, errors='ignore')
+
+    # Reconvert and clean each segment
+    for col in X_seg.columns:
+        X_seg[col] = pd.to_numeric(X_seg[col], errors='coerce')
+    X_seg = X_seg.fillna(X_seg.mean(numeric_only=True))
+
+    # Add constant and match columns exactly
+    X_seg = sm.add_constant(X_seg, has_constant='add')
+    X_seg = X_seg.reindex(columns=X.columns, fill_value=0)
+
+    # Predict
+    seg['theta_pred'] = model.predict(X_seg)
+
+
+    ax = axes[i]
+    ax.plot(seg['timestamp'], seg['theta'], 'o', label='Observed', markersize=4)
+    ax.plot(seg['timestamp'], seg['theta_pred'], '-', label='Predicted', linewidth=2)
+    ax.set_title(f"Drydown Segment {i+1} – {seg['timestamp'].dt.date.iloc[0]}")
+    ax.set_xlabel("Time")
+    ax.set_ylabel("Normalized WC (θ)")
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%m-%d %H:%M'))
+    ax.legend()
+    ax.grid(True)
+
+plt.tight_layout()
+plt.xticks(rotation=45)
+plt.show()
+
+# === COEFFICIENT SUMMARY TABLE ===
+summary_df = pd.DataFrame({
+    'Feature': model.params.index,
+    'Coefficient': model.params.values,
+    'Std_Error': model.bse.values,
+    't_stat': model.tvalues,
+    'p_value': model.pvalues
+})
+
+summary_df = summary_df[summary_df['Feature'] != 'const']
+summary_df['Significant'] = summary_df['p_value'].apply(lambda p: '***' if p < 0.001 else '**' if p < 0.01 else '*' if p < 0.05 else '')
+summary_df = summary_df.reindex(summary_df['Coefficient'].abs().sort_values(ascending=False).index)
+
+print("\n🔍 Coefficient Impact Summary (sorted by |effect|):")
+print(summary_df.to_string(index=False, float_format="%.5f"))
+
+
+
+feature_names = model.model.exog_names
+coefficients = model.params.values
+p_values = model.pvalues.values
+
+# Create a DataFrame
+coef_df = pd.DataFrame({
+    'feature': feature_names,
+    'coefficient': coefficients,
+    'p_value': p_values
+})
+
+# Exclude the intercept
+coef_df = coef_df[coef_df['feature'] != 'const']
+
+# Add absolute value for sorting
+coef_df['abs_coef'] = np.abs(coef_df['coefficient'])
+
+# Sort by absolute value
+coef_df = coef_df.sort_values(by='abs_coef', ascending=False)
+
+# Plot
+plt.figure(figsize=(12, 8))
+plt.barh(coef_df['feature'], coef_df['coefficient'], color='skyblue')
+plt.axvline(x=0, color='gray', linestyle='--')
+plt.title('Feature Impact on Theta (sorted by absolute coefficient)')
+plt.xlabel('Coefficient')
+plt.gca().invert_yaxis()
+plt.tight_layout()
+plt.show()
+
+
+# Plot standardized coefficients
+# Standardize features
+scaler = StandardScaler()
+X_std = pd.DataFrame(scaler.fit_transform(X.drop(columns='const')), columns=X.columns.drop('const'))
+X_std = sm.add_constant(X_std)
+
+# Fit model on standardized features
+model_std = sm.OLS(y, X_std).fit()
+
+# Drop intercept, get abs(coef), sort
+std_coefs = model_std.params.drop('const').abs().sort_values(ascending=False)
+print("🔍 Standardized Feature Importances:")
+print(std_coefs)
+
+# Plot t-statistics
+# Get model summary into a DataFrame (already in your code)
+summary_df = pd.DataFrame({
+    'Feature': model.params.index,
+    'Coefficient': model.params.values,
+    'Std_Error': model.bse.values,
+    't_stat': model.tvalues,
+    'p_value': model.pvalues
+})
+
+# Drop the intercept
+summary_df = summary_df[summary_df['Feature'] != 'const']
+
+# Add significance stars
+summary_df['Significant'] = summary_df['p_value'].apply(
+    lambda p: '***' if p < 0.001 else '**' if p < 0.01 else '*' if p < 0.05 else '')
+
+# Sort by absolute t-statistics
+summary_df = summary_df.reindex(summary_df['t_stat'].abs().sort_values(ascending=False).index)
+
+# Display clean output
+print("\n🔍 Features Sorted by t-statistic (importance = effect size / uncertainty):")
+print(summary_df[['Feature', 't_stat', 'p_value', 'Significant']].to_string(index=False, float_format="%.5f"))
