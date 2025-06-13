@@ -1,0 +1,118 @@
+import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+import os
+
+# === Load and clean data ===
+file_path = r"Data\Wageningen 2nd greenhouse challenge automatoes data.xlsx"
+sheet_name = "March"
+
+df = pd.read_excel(file_path, sheet_name=sheet_name)
+df = df[['%time', 'WC_slab1', 'water_sup', 'Tot_PAR', 'Tair']].copy()
+df.columns = ['timestamp', 'WC_slab1', 'water_sup', 'Tot_PAR', 'Tair']
+
+# Convert numeric values
+for col in ['WC_slab1', 'water_sup', 'Tot_PAR', 'Tair']:
+    df[col] = pd.to_numeric(df[col].astype(str).str.replace(',', '.'), errors='coerce')
+
+# Final cleanup
+df.dropna(inplace=True)
+df['timestamp'] = pd.to_datetime(df['timestamp'])
+df.sort_values('timestamp', inplace=True)
+df['date'] = df['timestamp'].dt.date
+df['water_sup_diff'] = df['water_sup'].diff().fillna(0)
+
+# === Generate drydown segments ===
+unique_dates = sorted(df['date'].unique())
+segments = []
+
+for i in range(len(unique_dates) - 1):
+    day1 = unique_dates[i]
+    day2 = unique_dates[i + 1]
+
+    df_day1 = df[df['date'] == day1]
+    df_day2 = df[df['date'] == day2]
+
+    if df_day1.empty or df_day2.empty:
+        continue
+
+    last_water_time_day1 = df_day1[df_day1['water_sup_diff'] > 0]['timestamp'].max()
+    first_water_time_day2 = df_day2[df_day2['water_sup_diff'] > 0]['timestamp'].min()
+
+    if pd.isna(last_water_time_day1) or pd.isna(first_water_time_day2):
+        continue
+
+    segment_mask = (df['timestamp'] > last_water_time_day1) & (df['timestamp'] < first_water_time_day2)
+    segment = df[segment_mask].copy()
+    if not segment.empty:
+        segments.append(segment)
+
+# Handle the last day's segment (if any watering occurred)
+last_day = unique_dates[-1]
+df_last_day = df[df['date'] == last_day]
+last_water_time_last_day = df_last_day[df_last_day['water_sup_diff'] > 0]['timestamp'].max()
+
+if pd.notna(last_water_time_last_day):
+    segment_mask = (df['timestamp'] > last_water_time_last_day)
+    segment = df[segment_mask].copy()
+    if not segment.empty:
+        segments.append(segment)
+
+
+# === Plot the dataset in groups of 3 days ===
+output_dir = "drydown_figures"
+os.makedirs(output_dir, exist_ok=True)
+
+days_per_fig = 3
+n_figs = (len(unique_dates) - 1) // days_per_fig
+
+for fig_idx in range(n_figs):
+    day_window = unique_dates[fig_idx * days_per_fig : (fig_idx + 1) * days_per_fig + 1]
+    df_window = df[df['date'].isin(day_window)]
+
+    fig, ax1 = plt.subplots(figsize=(16, 7))  # Larger figure for papers
+
+    # Plot main water content
+    ax1.plot(df_window['timestamp'], df_window['WC_slab1'], '-', color='skyblue', label='WC_slab1', linewidth=2)
+
+    # Overlay drydown segments
+    segment_plotted = False
+    for segment in segments:
+        if segment['date'].iloc[0] in day_window:
+            label = 'Dry-down Segment' if not segment_plotted else None
+            ax1.plot(segment['timestamp'], segment['WC_slab1'], '-', color='crimson', linewidth=3, label=label)
+            segment_plotted = True
+
+    # Styling
+    ax1.set_ylabel("Water Content (WC_slab1) [%]", fontsize=14)
+    ax1.set_xlabel("Time", fontsize=14)
+    ax1.set_title(f"Dry-down Segments: {day_window[0]} to {day_window[-1]}", fontsize=16)
+    ax1.tick_params(axis='both', labelsize=12)
+    ax1.grid(True)
+
+    # Water supply (secondary axis)
+    ax2 = ax1.twinx()
+    ax2.plot(df_window['timestamp'], df_window['water_sup'], '-', color='orange', alpha=0.8, label='Water Supplied', linewidth=2)
+    ax2.set_ylabel("Cumulative Water Supplied [minutes/day]", fontsize=14)
+    ax2.tick_params(axis='both', labelsize=12)
+
+    # Date formatting
+    ax1.xaxis.set_major_formatter(mdates.DateFormatter('%m-%d\n%H:%M'))
+    fig.autofmt_xdate(rotation=30)
+
+    # Combine legends once
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    handles = dict()
+    for l, label in zip(lines1 + lines2, labels1 + labels2):
+        if label not in handles:
+            handles[label] = l
+    ax1.legend(handles.values(), handles.keys(), loc='upper left', fontsize=12)
+
+    # === Save figure ===
+    file_name = f"drydown_fignew_{fig_idx + 1:02d}.png"
+    fig_path = os.path.join(output_dir, file_name)
+    plt.tight_layout()
+    plt.savefig(fig_path, dpi=300)
+    plt.show()
+    plt.close(fig)

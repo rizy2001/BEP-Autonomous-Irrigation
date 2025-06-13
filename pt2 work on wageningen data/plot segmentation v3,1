@@ -1,0 +1,93 @@
+import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+import os
+
+# === Load and clean data ===
+file_path = r"Data\Wageningen 2nd greenhouse challenge automatoes data.xlsx"
+sheet_name = "March"
+
+df = pd.read_excel(file_path, sheet_name=sheet_name)
+df = df[['%time', 'WC_slab1', 'water_sup', 'Tot_PAR', 'Tair']].copy()
+df.columns = ['timestamp', 'WC_slab1', 'water_sup', 'Tot_PAR', 'Tair']
+
+# Convert strings with commas to floats
+for col in ['WC_slab1', 'water_sup', 'Tot_PAR', 'Tair']:
+    df[col] = pd.to_numeric(df[col].astype(str).str.replace(',', '.'), errors='coerce')
+
+df.dropna(inplace=True)
+df['timestamp'] = pd.to_datetime(df['timestamp'])
+df.sort_values('timestamp', inplace=True)
+df['date'] = df['timestamp'].dt.date
+df['water_sup_diff'] = df['water_sup'].diff().fillna(0)
+
+# Generate drydown segments
+unique_dates = sorted(df['date'].unique())
+segments = []
+for i in range(len(unique_dates) - 1):
+    day1 = unique_dates[i]
+    day2 = unique_dates[i + 1]
+    df_day1 = df[df['date'] == day1]
+    df_day2 = df[df['date'] == day2]
+    if df_day1.empty or df_day2.empty:
+        continue
+    last_water_day1 = df_day1[df_day1['water_sup_diff'] > 0]['timestamp'].max()
+    first_water_day2 = df_day2[df_day2['water_sup_diff'] > 0]['timestamp'].min()
+    if pd.isna(last_water_day1) or pd.isna(first_water_day2):
+        continue
+    mask = (df['timestamp'] > last_water_day1) & (df['timestamp'] < first_water_day2)
+    segment = df[mask].copy()
+    if not segment.empty:
+        segments.append(segment)
+
+# Handle last day segment
+last_day = unique_dates[-1]
+df_last_day = df[df['date'] == last_day]
+last_water_last_day = df_last_day[df_last_day['water_sup_diff'] > 0]['timestamp'].max()
+if pd.notna(last_water_last_day):
+    segment = df[df['timestamp'] > last_water_last_day].copy()
+    if not segment.empty:
+        segments.append(segment)
+
+# === Plot for March 3rd and 4th ===
+target_days = unique_dates[3:5]  # Assumes 0-indexing, adjust if needed
+df_window = df[df['date'].isin(target_days)]
+
+fig, ax1 = plt.subplots(figsize=(20, 10))  # Large figure
+
+# Plot WC
+ax1.plot(df_window['timestamp'], df_window['WC_slab1'], '-', color='skyblue', label='WC_slab1', linewidth=3)
+
+# Plot drydown segments
+segment_plotted = False
+for segment in segments:
+    if segment['date'].iloc[0] in target_days:
+        label = 'Dry-down Segment' if not segment_plotted else None
+        ax1.plot(segment['timestamp'], segment['WC_slab1'], '-', color='crimson', linewidth=4, label=label)
+        segment_plotted = True
+
+# Axis and styling
+ax1.set_ylabel("Water Content (WC_slab1) [%]", fontsize=24)
+ax1.set_xlabel("Time", fontsize=24)
+ax1.set_title(f"Dry-down Segments: {target_days[0]} to {target_days[1]}", fontsize=28)
+ax1.tick_params(axis='both', labelsize=20)
+ax1.grid(True)
+
+# Water supply
+ax2 = ax1.twinx()
+ax2.plot(df_window['timestamp'], df_window['water_sup'], '-', color='orange', alpha=0.8, label='Water Supplied', linewidth=3)
+ax2.set_ylabel("Cumulative Water Supplied [minutes/day]", fontsize=24)
+ax2.tick_params(axis='both', labelsize=20)
+
+# Format x-axis
+ax1.xaxis.set_major_formatter(mdates.DateFormatter('%m-%d\n%H:%M'))
+fig.autofmt_xdate(rotation=30)
+
+# Combine legends
+lines1, labels1 = ax1.get_legend_handles_labels()
+lines2, labels2 = ax2.get_legend_handles_labels()
+handles = {label: line for line, label in zip(lines1 + lines2, labels1 + labels2)}
+ax1.legend(handles.values(), handles.keys(), loc='upper left', fontsize=20)
+
+plt.tight_layout()
+plt.show()
