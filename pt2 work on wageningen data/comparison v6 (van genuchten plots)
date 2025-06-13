@@ -270,7 +270,13 @@ days_per_fig = 1
 n_figs = math.ceil(len(test_dates_sorted) / days_per_fig)
 
 # === Plot ===
-'''
+
+import os
+
+# Directory to save plots
+output_dir = "drydown_plots"
+os.makedirs(output_dir, exist_ok=True)
+
 for fig_idx in range(n_figs):
     group_dates = test_dates_sorted[fig_idx * days_per_fig : (fig_idx + 1) * days_per_fig]
     segment_ids = [sid for date in group_dates for sid in segments_by_date[date]]
@@ -291,14 +297,12 @@ for fig_idx in range(n_figs):
     for ax, event_id in zip(axes, segment_ids):
         segment = segments_by_id[event_id]
         ax.plot(segment['time'], segment['WC_observed'], 'o', label='Observed')
-        #for model in ['vg_pred', 'water_balance_pred', 'exp_pred', 'lin_pred', 'greybox_pred']:
-        for model in ['vg_pred']:
+        for model in ['vg_pred', 'water_balance_pred', 'exp_pred', 'lin_pred', 'greybox_pred']:
             col = model + '_WC'
             if col in segment:
                 ax.plot(segment['time'], segment[col], label=model.replace('_', ' ').title())
+
         ax.set_ylabel('Water Content (WC_slab1) [%]', fontsize=axis_label_fontsize)
-
-
         ax.set_title(f"Drydown Event {segment['timestamp'].dt.date.iloc[0]}", fontsize=title_fontsize)
         ax.set_xlabel('Time (h)', fontsize=axis_label_fontsize)
         ax.tick_params(axis='both', labelsize=tick_label_fontsize)
@@ -306,7 +310,13 @@ for fig_idx in range(n_figs):
         ax.grid(True)
 
     plt.tight_layout()
-    plt.show()'''
+
+    # Save the figure
+    save_path = os.path.join(output_dir, f"drydown_plot_{fig_idx+1}.png")
+    plt.savefig(save_path, dpi=300)
+    
+    plt.show()  # Optional, can be removed if just saving
+
 
 
 

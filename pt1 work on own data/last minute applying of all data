@@ -1,0 +1,225 @@
+import pandas as pd
+import numpy as np
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import r2_score
+from scipy.optimize import curve_fit
+from scipy.integrate import cumulative_trapezoid
+import matplotlib.pyplot as plt
+
+# === Load and preprocess full data ===
+df = pd.read_excel("Data/Master Data - met sensoren_nieuwe code.xlsx")
+df['Timestamp'] = pd.to_datetime(df['Timestamp'])
+
+dry_weights = {
+    'LoadCell_1': 75, 'LoadCell_2': 60, 'LoadCell_3': 85, 'LoadCell_4': 80,
+    'LoadCell_5': 85, 'LoadCell_6': 75, 'LoadCell_7': 85, 'LoadCell_8': 80
+}
+max_water_contents = {key: 585 for key in dry_weights}
+valid_range = (400, 800)
+
+loadcell_cols = [f'LoadCell_{i}' for i in range(1, 9)]
+for col in loadcell_cols:
+    df = df[(df[col] >= valid_range[0]) & (df[col] <= valid_range[1])]
+
+# Compute normalized moisture for each load cell
+for lc in dry_weights:
+    df[f'{lc}_moisture'] = (df[lc] - dry_weights[lc]) / max_water_contents[lc]
+
+# === Segmentation logic ===
+def improved_segment_series(timestamps, series, min_segment_size=6, min_rise=0.002):
+    segments = []
+    delta = series.diff().fillna(0)
+    watering_points = delta[delta > min_rise].index.to_list()
+    watering_points = [-1] + watering_points + [len(series)]
+
+    for i in range(len(watering_points) - 1):
+        start = watering_points[i] + 1
+        end = watering_points[i + 1]
+        if end - start < min_segment_size:
+            continue
+
+        seg_series = series.iloc[start:end].copy()
+        seg_time = timestamps.iloc[start:end].copy()
+        t = (seg_time - seg_time.iloc[0]).dt.total_seconds() / 3600
+        theta_min = seg_series.min()
+        theta_max = seg_series.max()
+        if theta_max == theta_min:
+            continue
+
+        segment = pd.DataFrame({
+            'Timestamp': seg_time,
+            'time': t,
+            'theta': (seg_series - theta_min) / (theta_max - theta_min),
+            'theta_raw': seg_series
+        })
+        segments.append(segment)
+
+    return segments
+
+# Segment all cells
+segmented_data = {}
+for lc in dry_weights:
+    col = f'{lc}_moisture'
+    segmented_data[lc] = improved_segment_series(df['Timestamp'], df[col])
+
+
+# === Model Definitions ===
+def exp_decay(t, a, b, c):
+    return a * np.exp(-b * t) + c
+
+def van_genuchten(h, theta_r, theta_s, alpha, n):
+    m = 1 - 1 / n
+    return theta_r + (theta_s - theta_r) / ((1 + (alpha * h)**n) ** m)
+
+# === Model Fitting Function ===
+def fit_models_to_segment(segment, PAR=None, Tair=None):
+    result = segment.copy()
+    theta = result['theta_raw']
+    time = result['time']
+
+    theta_min = theta.min()
+    theta_max = theta.max()
+    norm_theta = (theta - theta_min) / (theta_max - theta_min)
+    h_sim = np.exp(time / time.max() * 5)
+    result['h_sim'] = h_sim
+
+    # Water Balance
+    if PAR is not None and Tair is not None:
+        try:
+            def theta_phys_model(t, k1, k2, k3):
+                et = k1 * PAR + k2 * Tair + k3
+                cum_et = cumulative_trapezoid(et, t, initial=0)
+                return theta.iloc[0] - cum_et
+
+            phys_params, _ = curve_fit(theta_phys_model, time, theta, p0=[0.01, 0.01, 0.01])
+            et = phys_params[0] * PAR + phys_params[1] * Tair + phys_params[2]
+            result['water_balance_pred'] = theta.iloc[0] - cumulative_trapezoid(et, time, initial=0)
+        except:
+            result['water_balance_pred'] = np.nan
+
+    # Van Genuchten
+    try:
+        vg_params, _ = curve_fit(van_genuchten, h_sim, norm_theta, p0=[0.05, 1.0, 0.05, 2.0],
+                                 bounds=([0, 0.8, 0.0001, 1.1], [0.5, 1.2, 1.0, 5.0]), maxfev=10000)
+        result['vg_pred'] = van_genuchten(h_sim, *vg_params) * (theta_max - theta_min) + theta_min
+    except:
+        result['vg_pred'] = np.nan
+
+    # Grey-box
+    try:
+        residuals = theta - result['vg_pred']
+        grey_model = LinearRegression().fit(time.values.reshape(-1, 1), residuals)
+        result['greybox_pred'] = result['vg_pred'] + grey_model.predict(time.values.reshape(-1, 1))
+    except:
+        result['greybox_pred'] = np.nan
+
+    # Exponential Decay
+    try:
+        exp_params, _ = curve_fit(exp_decay, time, theta, p0=[1, 0.1, 0])
+        result['exp_pred'] = exp_decay(time, *exp_params)
+    except:
+        result['exp_pred'] = np.nan
+
+    # Linear Regression
+    try:
+        lin_model = LinearRegression().fit(time.values.reshape(-1, 1), theta)
+        result['lin_pred'] = lin_model.predict(time.values.reshape(-1, 1))
+    except:
+        result['lin_pred'] = np.nan
+
+    # R² Scores
+    r2_scores = {
+        model: r2_score(theta, result[model]) if model in result and not result[model].isna().all() else np.nan
+        for model in ['water_balance_pred', 'vg_pred', 'greybox_pred', 'exp_pred', 'lin_pred']
+    }
+
+    return result, r2_scores
+
+# === Optional: Visualization Function ===
+def plot_segment_with_predictions(result, title="Model Fits"):
+    plt.figure(figsize=(12, 6))
+    plt.plot(result['time'], result['theta_raw'], 'o', label='Observed')
+
+    for col, label in [
+        ('water_balance_pred', 'Water Balance'),
+        ('vg_pred', 'Van Genuchten'),
+        ('greybox_pred', 'Grey-box'),
+        ('exp_pred', 'Exponential Decay'),
+        ('lin_pred', 'Linear Regression')
+    ]:
+        if col in result and not result[col].isna().all():
+            plt.plot(result['time'], result[col], label=label)
+
+    plt.xlabel("Time [h]")
+    plt.ylabel("Water Content [%]")
+    plt.title(title)
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
+
+# Select the first dry-down segment from LoadCell_7
+segment = segmented_data['LoadCell_7'][0]
+
+# Merge in PAR and Tair
+merged_segment = segment.merge(df[['Timestamp', 'Tot_PAR', 'Tair']], on='Timestamp', how='left')
+
+# Fit models
+fitted, scores = fit_models_to_segment(
+    merged_segment,
+    PAR=merged_segment['Tot_PAR'].values,
+    Tair=merged_segment['Tair'].values
+)
+
+# Optional: plot results
+plot_segment_with_predictions(fitted, title="Model Fits on First Dry-down Segment")
+print("R² Scores:", scores)
+
+
+
+# === Usage Example ===
+merged_segment = segment.merge(df[['Timestamp', 'Tot_PAR', 'Tair']], on='Timestamp', how='left')
+result, scores = fit_models_to_segment(merged_segment, merged_segment['Tot_PAR'].values, merged_segment['Tair'].values)
+plot_segment_with_predictions(result, title="Drydown Fit Example")
+
+
+# === Apply models to ALL LoadCell_7 segments ===
+all_fitted_segments = []
+r2_all_scores = []
+
+for i, segment in enumerate(segmented_data['LoadCell_7']):
+    # Merge PAR and Tair
+    merged_segment = segment.merge(df[['Timestamp', 'Tot_PAR', 'Tair']], on='Timestamp', how='left')
+    
+    # Fit all models
+    fitted, scores = fit_models_to_segment(
+        merged_segment,
+        PAR=merged_segment['Tot_PAR'].values,
+        Tair=merged_segment['Tair'].values
+    )
+
+    all_fitted_segments.append(fitted)
+    r2_all_scores.append({'Segment': i, **scores})
+
+    # Plot each segment
+    plot_segment_with_predictions(fitted, title=f"Model Fits - Segment {i}")
+
+# === Convert R² scores to DataFrame ===
+r2_df = pd.DataFrame(r2_all_scores)
+print("\nR² Scores per Segment:")
+print(r2_df)
+
+
+# === Plot only the last segment with the date in the title ===
+last_segment = segmented_data['LoadCell_7'][-1]
+merged_last = last_segment.merge(df[['Timestamp', 'Tot_PAR', 'Tair']], on='Timestamp', how='left')
+
+fitted_last, scores_last = fit_models_to_segment(
+    merged_last,
+    PAR=merged_last['Tot_PAR'].values,
+    Tair=merged_last['Tair'].values
+)
+
+last_date = merged_last['Timestamp'].iloc[0].date()
+plot_segment_with_predictions(fitted_last, title=f"Model fits on Loadcell 7 - {last_date}")
+print("R² Scores for Last Segment:", scores_last)

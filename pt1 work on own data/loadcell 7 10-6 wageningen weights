@@ -72,41 +72,60 @@ df_segment['vg_pred'] = vg_pred_norm * (theta_max - theta_min) + theta_min
 residual = greybox_coef * df_segment['time'] + greybox_intercept
 df_segment['greybox_pred'] = df_segment['vg_pred'] + residual
 
-# Exponential Decay
-df_segment['exp_pred'] = exp_decay(df_segment['time'], *exp_params)
+# Exponential Decay (denormalized)
+exp_pred_norm = exp_decay(df_segment['time'], *exp_params)
+df_segment['exp_pred'] = exp_pred_norm * (theta_max - theta_min) + theta_min
 
-# Linear Regression
-df_segment['lin_pred'] = linreg_coef * df_segment['time'] + linreg_intercept
+# Linear Regression (denormalized)
+lin_pred_norm = linreg_coef * df_segment['time'] + linreg_intercept
+df_segment['lin_pred'] = lin_pred_norm * (theta_max - theta_min) + theta_min
 
-# === Plot Water Content ===
-plt.figure(figsize=(12, 6))
-plt.plot(df_segment['Timestamp'], df_segment['theta'], label='Water Content')
+
+# === Styling Config ===
+title_fontsize = 28
+axis_label_fontsize = 24
+tick_label_fontsize = 20
+legend_fontsize = 20
+figsize = (20, 10)
+
+# === Plot Water Content (Timestamp vs. theta) ===
+plt.figure(figsize=figsize)
+plt.plot(df_segment['Timestamp'], df_segment['theta'], 'o', label='Observed', markersize=5)
 plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%H:%M\n%d-%b'))
 plt.gcf().autofmt_xdate()
-plt.xlabel('Time')
-plt.ylabel('Water Content [%]')
-plt.title('Water Content of LoadCell_7 Over Drydown Segment')
+
+plt.xlabel('Time', fontsize=axis_label_fontsize)
+plt.ylabel('Water Content [%]', fontsize=axis_label_fontsize)
+plt.title('Water Content of LoadCell_7 Over Drydown Segment', fontsize=title_fontsize)
+plt.tick_params(axis='both', labelsize=tick_label_fontsize)
+plt.legend(fontsize=legend_fontsize)
 plt.grid(True)
-plt.legend()
 plt.tight_layout()
 plt.show()
 
-# === Plot Model Fits in Actual Units ===
-plt.figure(figsize=(12, 6))
+# === Plot Model Fits in Actual Units (Time vs. Predictions) ===
+plt.figure(figsize=figsize)
 plt.plot(df_segment['time'], df_segment['theta'], 'o', label='Observed', markersize=5)
-plt.plot(df_segment['time'], df_segment['water_balance_pred'], label='Water Balance')
-plt.plot(df_segment['time'], df_segment['vg_pred'], label='Van Genuchten')
-plt.plot(df_segment['time'], df_segment['greybox_pred'], label='Grey-box')
-#plt.plot(df_segment['time'], df_segment['exp_pred'], label='Exponential Decay')
-#plt.plot(df_segment['time'], df_segment['lin_pred'], label='Linear Regression')
 
-plt.xlabel('Time (h)')
-plt.ylabel('Water Content [%]')
-plt.title('Model Predictions on LoadCell_7 Drydown Segment')
-plt.legend()
+for col, label in [
+    ('water_balance_pred', 'Water Balance'),
+    ('vg_pred', 'Van Genuchten'),
+    ('greybox_pred', 'Grey-box'),
+    ('exp_pred', 'Exponential Decay'),
+    ('lin_pred', 'Linear Regression')
+]:
+    if col in df_segment and not df_segment[col].isna().all():
+        plt.plot(df_segment['time'], df_segment[col], label=label)
+
+plt.xlabel('Time (h)', fontsize=axis_label_fontsize)
+plt.ylabel('Water Content [%]', fontsize=axis_label_fontsize)
+plt.title('Model Predictions on LoadCell_7 Drydown Segment', fontsize=title_fontsize)
+plt.tick_params(axis='both', labelsize=tick_label_fontsize)
+plt.legend(fontsize=legend_fontsize)
 plt.grid(True)
 plt.tight_layout()
 plt.show()
+
 
 # === Calculate R² Scores ===
 r2_scores = {

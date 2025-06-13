@@ -86,10 +86,13 @@ except:
 
 # Exponential Decay
 try:
-    exp_params, _ = curve_fit(exp_decay, df_segment['time'], df_segment['theta'], p0=[1, 0.1, 0])
+    exp_params, _ = curve_fit(exp_decay, df_segment['time'], df_segment['theta'], p0=[df_segment['theta'].iloc[0], 0.01, df_segment['theta'].iloc[-1]]
+)
     df_segment['exp_pred'] = exp_decay(df_segment['time'], *exp_params)
-except:
+except Exception as e:
+    print("Exponential Decay fit failed:", e)
     df_segment['exp_pred'] = np.nan
+
 
 # Linear Regression
 try:
@@ -99,9 +102,16 @@ try:
 except:
     df_segment['lin_pred'] = np.nan
 
-# === Plot Model Fits Against Real Timestamps ===
-plt.figure(figsize=(12, 6))
-plt.plot(df_segment['Timestamp'], df_segment['theta'], 'o', label='Observed', markersize=5)
+# === Improved Plot Styling ===
+title_fontsize = 28
+axis_label_fontsize = 24
+tick_label_fontsize = 20
+legend_fontsize = 20
+figsize = (20, 10)  # Large figure for clarity
+
+plt.figure(figsize=figsize)
+plt.plot(df_segment['time'], df_segment['theta'], 'o', label='Observed', markersize=5)
+
 for col, label in [
     ('water_balance_pred', 'Water Balance'),
     ('vg_pred', 'Van Genuchten'),
@@ -109,18 +119,19 @@ for col, label in [
     ('exp_pred', 'Exponential Decay'),
     ('lin_pred', 'Linear Regression')
 ]:
-    if col in df_segment:
-        plt.plot(df_segment['Timestamp'], df_segment[col], label=label)
+    if col in df_segment and not df_segment[col].isna().all():
+        plt.plot(df_segment['time'], df_segment[col], label=label)
 
-plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%H:%M\n%d-%b'))
-plt.gcf().autofmt_xdate()
-plt.xlabel('Timestamp')
-plt.ylabel('Water Content [%]')
-plt.title('Model Fits on LoadCell_7 (Timestamp-Aligned)')
-plt.legend()
+plt.xlabel('Time [h]', fontsize=axis_label_fontsize)
+plt.ylabel('Water Content [%]', fontsize=axis_label_fontsize)
+plt.title('Model Fits on LoadCell_7 Drydown Segment (2025-06-10)', fontsize=title_fontsize)
+plt.legend(fontsize=legend_fontsize)
+plt.tick_params(axis='both', labelsize=tick_label_fontsize)
 plt.grid(True)
 plt.tight_layout()
 plt.show()
+
+
 
 # === Calculate R² Scores ===
 r2_scores = {}
